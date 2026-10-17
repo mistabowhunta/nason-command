@@ -1,0 +1,82 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: command-mediamtx
+    restart: unless-stopped
+    environment:
+      - TZ=America/Los_Angeles
+      - MTX_WEBRTCADDITIONALHOSTS=${HOST_LAN_IP:-192.168.1.27}
+      - MTX_WEBRTCLOCALUDPADDRESS=:8189
+    ports:
+      - "8554:8554"       # RTSP (TCP)
+      - "8000:8000/udp"   # RTP
+      - "8001:8001/udp"   # RTCP
+      - "8888:8888"       # HLS
+      - "8889:8889"       # WebRTC (HTTP WHEP signaling)
+      - "8189:8189/udp"   # WebRTC (Single-port ICE/UDP mux)
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    networks:
+      - command-net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: command-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - command-net
+
+  fastapi-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: command-backend
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - MEDIAMTX_RTSP_BASE=rtsp://mediamtx:8554
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/app:/app/app:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+    networks:
+      - command-net
+
+  react-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: command-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - fastapi-backend
+    networks:
+      - command-net
+
+volumes:
+  pg_data:
+    driver: local
+
+networks:
+  command-net:
+    driver: bridge
