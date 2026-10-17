@@ -14,6 +14,8 @@ cv2.setNumThreads(1)
 
 RTSP_BASE = os.getenv("MEDIAMTX_RTSP_BASE", "rtsp://mediamtx:8554")
 MODEL_PATH = "/app/models/yolov8n.onnx"
+SNAPSHOT_DIR = "/tmp/command_snapshots"
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
 YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
     0: ("person", "person"),
@@ -71,7 +73,6 @@ class LatestFrameGrabber:
 
 
 class CameraMotionTracker:
-    """Locks persistent Motion_1..Motion_N slots onto targets via centroid distance."""
     def __init__(self):
         self.active_tracks: dict[int, dict] = {}
         self.logged_track_keys: set[str] = set()
@@ -80,7 +81,6 @@ class CameraMotionTracker:
 
     def update(self, raw_detections: list[dict]) -> tuple[list[dict], list[dict]]:
         now = time.time()
-        # Expire tracks unseen for > 1.2s
         self.active_tracks = {
             slot: t for slot, t in self.active_tracks.items() if now - t["last_seen"] < 1.2
         }
@@ -95,12 +95,11 @@ class CameraMotionTracker:
         assigned: list[tuple[int, dict]] = []
         used_slots: set[int] = set()
 
-        # 1. Match detections to existing active slots by nearest centroid
         for det in list(unmatched_dets):
             cx = det["x"] + det["w"] / 2.0
             cy = det["y"] + det["h"] / 2.0
             best_slot = None
-            best_dist = 0.22  # Max normalized jump distance per frame
+            best_dist = 0.22
 
             for slot, track in self.active_tracks.items():
                 if slot in used_slots or track["category"] != det["category"]:
@@ -121,7 +120,6 @@ class CameraMotionTracker:
                 assigned.append((best_slot, det))
                 unmatched_dets.remove(det)
 
-        # 2. Assign lowest available slot numbers (1..8) to newly appeared targets
         for det in unmatched_dets:
             cx = det["x"] + det["w"] / 2.0
             cy = det["y"] + det["h"] / 2.0
@@ -164,7 +162,7 @@ class CameraMotionTracker:
                 self.logged_track_keys.add(dedupe_key)
                 if len(self.logged_track_keys) > 200:
                     self.logged_track_keys.clear()
-                new_db_events.append(box_item)
+                new_db_events.append(dict(box_item))
 
         self.last_valid_boxes = active_output
         self.last_valid_time = now
@@ -248,6 +246,24 @@ class EdgeCVEngine:
                 })
         return results
 
+    def _save_snapshots(self, stream_name: str, frame: np.ndarray, db_events: list[dict]):
+        fh, fw, _ = frame.shape
+        ts_ms = int(time.time() * 1000)
+        for ev in db_events:
+            snap_id = f"{stream_name}_{ts_ms}_{ev['slot']}.jpg"
+            pad_x = ev["w"] * 0.18
+            pad_y = ev["h"] * 0.18
+            x1 = int(max(0.0, ev["x"] - pad_x) * fw)
+            y1 = int(max(0.0, ev["y"] - pad_y) * fh)
+            x2 = int(min(1.0, ev["x"] + ev["w"] + pad_x) * fw)
+            y2 = int(min(1.0, ev["y"] + ev["h"] + pad_y) * fh)
+
+            crop = frame[y1:y2, x1:x2]
+            if crop.size > 0:
+                cv2.imwrite(f"{SNAPSHOT_DIR}/crop_{snap_id}", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            cv2.imwrite(f"{SNAPSHOT_DIR}/full_{snap_id}", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+            ev["attributes"] = snap_id
+
     def _worker(self, stream_name: str):
         rtsp_url = f"{RTSP_BASE}/{stream_name}"
         grabber = LatestFrameGrabber(rtsp_url)
@@ -300,6 +316,7 @@ class EdgeCVEngine:
             self.latest_detections[stream_name] = active_out
 
             if db_events:
+                self._save_snapshots(stream_name, frame, db_events)
                 asyncio.run_coroutine_threadsafe(
                     self.event_queue.put((stream_name, db_events)), self.loop
                 )
@@ -317,7 +334,7 @@ async def db_persistence_worker(event_queue: asyncio.Queue):
                         motion_slot=ev["slot"],
                         category=ev["category"],
                         sub_type=ev["sub_type"],
-                        attributes="",
+                        attributes=ev.get("attributes", ""),
                         full_label=ev["full_label"],
                         confidence=ev["confidence"],
                         bbox_x=ev["x"],

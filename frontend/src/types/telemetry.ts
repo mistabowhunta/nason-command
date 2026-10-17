@@ -11,6 +11,18 @@ export interface BoundingBoxDetection {
   h: number;
 }
 
+export interface PersistedDetectionEvent {
+  id: number;
+  timestamp: string;
+  camera_id: string;
+  category: string;
+  sub_type: string;
+  full_label: string;
+  confidence: number;
+  crop_url: string | null;
+  full_url: string | null;
+}
+
 export interface TelemetryHeartbeat {
   type: 'HEARTBEAT' | 'PONG';
   timestamp: string;
