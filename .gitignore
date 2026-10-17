@@ -5,3 +5,4 @@ node_modules/
 dist/
 pg_data/
 *.tflite
+mediamtx/mediamtx.yml
