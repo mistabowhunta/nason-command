@@ -1,4 +1,5 @@
 import asyncio
+import math
 import os
 import threading
 import time
@@ -9,13 +10,11 @@ import onnxruntime as ort
 from app.db.session import AsyncSessionLocal
 from app.db.models import DetectionEvent
 
-# Prevent OpenCV from spawning excessive threads that starve MediaMTX
 cv2.setNumThreads(1)
 
 RTSP_BASE = os.getenv("MEDIAMTX_RTSP_BASE", "rtsp://mediamtx:8554")
 MODEL_PATH = "/app/models/yolov8n.onnx"
 
-# Strictly person, vehicle, and animal
 YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
     0: ("person", "person"),
     1: ("vehicle", "bicycle"),
@@ -32,7 +31,6 @@ YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
 
 
 class LatestFrameGrabber:
-    """Continuously drains RTSP frames so CV inference always gets the 0ms real-time frame."""
     def __init__(self, rtsp_url: str):
         self.rtsp_url = rtsp_url
         self.frame: np.ndarray | None = None
@@ -73,25 +71,78 @@ class LatestFrameGrabber:
 
 
 class CameraMotionTracker:
+    """Locks persistent Motion_1..Motion_N slots onto targets via centroid distance."""
     def __init__(self):
+        self.active_tracks: dict[int, dict] = {}
         self.logged_track_keys: set[str] = set()
         self.last_valid_boxes: list[dict] = []
         self.last_valid_time: float = 0.0
 
     def update(self, raw_detections: list[dict]) -> tuple[list[dict], list[dict]]:
         now = time.time()
-        active_output = []
-        new_db_events = []
+        # Expire tracks unseen for > 1.2s
+        self.active_tracks = {
+            slot: t for slot, t in self.active_tracks.items() if now - t["last_seen"] < 1.2
+        }
 
         if not raw_detections:
-            # Hold boxes for 400ms so they don't flicker between frames
             if now - self.last_valid_time < 0.4:
                 return self.last_valid_boxes, []
             self.last_valid_boxes = []
             return [], []
 
-        for idx, det in enumerate(raw_detections[:8], start=1):
-            slot_name = f"Motion_{idx}"
+        unmatched_dets = list(raw_detections[:8])
+        assigned: list[tuple[int, dict]] = []
+        used_slots: set[int] = set()
+
+        # 1. Match detections to existing active slots by nearest centroid
+        for det in list(unmatched_dets):
+            cx = det["x"] + det["w"] / 2.0
+            cy = det["y"] + det["h"] / 2.0
+            best_slot = None
+            best_dist = 0.22  # Max normalized jump distance per frame
+
+            for slot, track in self.active_tracks.items():
+                if slot in used_slots or track["category"] != det["category"]:
+                    continue
+                dist = math.hypot(cx - track["cx"], cy - track["cy"])
+                if dist < best_dist:
+                    best_dist = dist
+                    best_slot = slot
+
+            if best_slot is not None:
+                used_slots.add(best_slot)
+                self.active_tracks[best_slot] = {
+                    "cx": cx,
+                    "cy": cy,
+                    "category": det["category"],
+                    "last_seen": now,
+                }
+                assigned.append((best_slot, det))
+                unmatched_dets.remove(det)
+
+        # 2. Assign lowest available slot numbers (1..8) to newly appeared targets
+        for det in unmatched_dets:
+            cx = det["x"] + det["w"] / 2.0
+            cy = det["y"] + det["h"] / 2.0
+            slot = 1
+            while slot in used_slots or slot in self.active_tracks:
+                slot += 1
+            used_slots.add(slot)
+            self.active_tracks[slot] = {
+                "cx": cx,
+                "cy": cy,
+                "category": det["category"],
+                "last_seen": now,
+            }
+            assigned.append((slot, det))
+
+        assigned.sort(key=lambda item: item[0])
+        active_output = []
+        new_db_events = []
+
+        for slot, det in assigned:
+            slot_name = f"Motion_{slot}"
             full_label = f"{slot_name}_{det['category']}"
 
             box_item = {
@@ -207,7 +258,7 @@ class EdgeCVEngine:
         last_processed_time = 0.0
 
         while self.running:
-            time.sleep(0.20)  # ~5 FPS inspection rate per camera
+            time.sleep(0.18)
             frame, f_time = grabber.get_latest()
             if frame is None or f_time <= last_processed_time:
                 continue
@@ -234,7 +285,6 @@ class EdgeCVEngine:
             moving_detections = []
 
             for det in yolo_dets:
-                # Ignore the Christmas tree skirt fur pile in the garage on annke_1
                 if stream_name == "annke_1" and det["category"] == "animal" and (0.48 < det["x"] < 0.82 and 0.38 < det["y"] < 0.85):
                     continue
 
