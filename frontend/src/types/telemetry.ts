@@ -9,6 +9,20 @@ export interface BoundingBoxDetection {
   y: number;
   w: number;
   h: number;
+  breach?: boolean;
+}
+
+export interface ZonePoint {
+  x: number;
+  y: number;
+}
+
+export interface CameraZone {
+  id: number;
+  camera_id: string;
+  name: string;
+  zone_type: 'exclusion' | 'tripwire';
+  points: ZonePoint[];
 }
 
 export interface PersistedDetectionEvent {

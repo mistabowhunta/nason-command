@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTelemetryWs } from './hooks/useTelemetryWs';
 import { StatusHeader } from './components/StatusHeader';
 import { VideoTile } from './components/VideoTile';
 import { EvidenceRail } from './components/EvidenceRail';
+import type { CameraZone } from './types/telemetry';
 import { LayoutGrid, PanelRightClose, PanelRightOpen } from 'lucide-react';
 
 const HOST_IP = window.location.hostname || '192.168.1.27';
@@ -17,7 +18,15 @@ export default function App() {
   const { telemetry, status } = useTelemetryWs(`ws://${HOST_IP}:8080/ws/telemetry`);
   const [focusedStream, setFocusedStream] = useState<string | null>(null);
   const [showRail, setShowRail] = useState<boolean>(true);
+  const [zonesByCam, setZonesByCam] = useState<Record<string, CameraZone[]>>({});
   const detections = telemetry?.detections || {};
+
+  useEffect(() => {
+    fetch(`http://${HOST_IP}:8080/api/zones`)
+      .then((res) => (res.ok ? res.json() : {}))
+      .then((data) => setZonesByCam(data))
+      .catch((err) => console.error('Failed to load camera zones:', err));
+  }, []);
 
   const primaryCam = CAMERAS.find((c) => c.streamName === focusedStream);
   const secondaryCams = CAMERAS.filter((c) => c.streamName !== focusedStream);
@@ -63,6 +72,8 @@ export default function App() {
                   streamName={primaryCam.streamName}
                   hostIp={HOST_IP}
                   detections={detections[primaryCam.streamName] || []}
+                  zones={zonesByCam[primaryCam.streamName] || []}
+                  onZonesUpdated={setZonesByCam}
                   isFocused={true}
                   onToggleFocus={() => setFocusedStream(null)}
                 />
@@ -75,6 +86,8 @@ export default function App() {
                     streamName={cam.streamName}
                     hostIp={HOST_IP}
                     detections={detections[cam.streamName] || []}
+                    zones={zonesByCam[cam.streamName] || []}
+                    onZonesUpdated={setZonesByCam}
                     isFocused={false}
                     onToggleFocus={() => setFocusedStream(cam.streamName)}
                   />
@@ -90,6 +103,8 @@ export default function App() {
                   streamName={cam.streamName}
                   hostIp={HOST_IP}
                   detections={detections[cam.streamName] || []}
+                  zones={zonesByCam[cam.streamName] || []}
+                  onZonesUpdated={setZonesByCam}
                   isFocused={false}
                   onToggleFocus={() => setFocusedStream(cam.streamName)}
                 />

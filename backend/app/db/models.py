@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Float, Integer, DateTime, func
+from sqlalchemy import String, Float, Integer, DateTime, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -25,3 +25,13 @@ class DetectionEvent(Base):
     bbox_y: Mapped[float] = mapped_column(Float)
     bbox_w: Mapped[float] = mapped_column(Float)
     bbox_h: Mapped[float] = mapped_column(Float)
+
+
+class CameraZone(Base):
+    __tablename__ = "camera_zones"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[str] = mapped_column(String(50), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    zone_type: Mapped[str] = mapped_column(String(32))  # 'exclusion' or 'tripwire'
+    points_json: Mapped[str] = mapped_column(Text)      # JSON list of {"x": float, "y": float}

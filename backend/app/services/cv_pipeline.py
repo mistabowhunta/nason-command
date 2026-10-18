@@ -32,6 +32,28 @@ YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
 }
 
 
+def point_in_polygon(x: float, y: float, poly: list[dict]) -> bool:
+    """Ray-casting algorithm to test if normalized point (x, y) is inside a polygon."""
+    n = len(poly)
+    if n < 3:
+        return False
+    inside = False
+    p1x, p1y = float(poly[0]["x"]), float(poly[0]["y"])
+    for i in range(1, n + 1):
+        p2x, p2y = float(poly[i % n]["x"]), float(poly[i % n]["y"])
+        if y > min(p1y, p2y):
+            if y <= max(p1y, p2y):
+                if x <= max(p1x, p2x):
+                    if p1y != p2y:
+                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
+                    else:
+                        xinters = p1x
+                    if p1x == p2x or x <= xinters:
+                        inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
+
 class LatestFrameGrabber:
     def __init__(self, rtsp_url: str):
         self.rtsp_url = rtsp_url
@@ -141,7 +163,9 @@ class CameraMotionTracker:
 
         for slot, det in assigned:
             slot_name = f"Motion_{slot}"
-            full_label = f"{slot_name}_{det['category']}"
+            is_breach = bool(det.get("breach", False))
+            suffix = "_BREACH" if is_breach else ""
+            full_label = f"{slot_name}_{det['category']}{suffix}"
 
             box_item = {
                 "slot": slot_name,
@@ -154,6 +178,7 @@ class CameraMotionTracker:
                 "y": round(det["y"], 4),
                 "w": round(det["w"], 4),
                 "h": round(det["h"], 4),
+                "breach": is_breach,
             }
             active_output.append(box_item)
 
@@ -176,6 +201,8 @@ class EdgeCVEngine:
         self.loop = loop
         self.running = True
         self.latest_detections: dict[str, list[dict]] = {s: [] for s in streams}
+        self.zones: dict[str, list[dict]] = {s: [] for s in streams}
+        self.zones_lock = threading.Lock()
         self.grabbers: list[LatestFrameGrabber] = []
         self.infer_lock = threading.Lock()
 
@@ -186,6 +213,15 @@ class EdgeCVEngine:
             MODEL_PATH, sess_options=sess_opts, providers=["CPUExecutionProvider"]
         )
         self.input_name = self.ort_session.get_inputs()[0].name
+
+    def set_zones(self, zones_by_cam: dict[str, list[dict]]):
+        with self.zones_lock:
+            for s in self.streams:
+                self.zones[s] = list(zones_by_cam.get(s, []))
+
+    def get_zones(self, stream_name: str) -> list[dict]:
+        with self.zones_lock:
+            return list(self.zones.get(stream_name, []))
 
     def start(self):
         for stream in self.streams:
@@ -298,18 +334,40 @@ class EdgeCVEngine:
                 continue
 
             yolo_dets = self._run_yolo(frame)
+            cam_zones = self.get_zones(stream_name)
             moving_detections = []
 
             for det in yolo_dets:
+                # Legacy fallback exclusion for garage tree skirt until drawn via UI
                 if stream_name == "annke_1" and det["category"] == "animal" and (0.48 < det["x"] < 0.82 and 0.38 < det["y"] < 0.85):
                     continue
 
                 xmin, ymin, xmax, ymax = det["x"], det["y"], det["x"] + det["w"], det["y"] + det["h"]
-                if any(
+                if not any(
                     not (xmax < mx or xmin > mx + mw or ymax < my or ymin > my + mh)
                     for (mx, my, mw, mh) in motion_boxes
                 ):
-                    moving_detections.append(det)
+                    continue
+
+                cx = det["x"] + det["w"] / 2.0
+                cy = det["y"] + det["h"] / 2.0
+
+                # Check user-defined Exclusion & Tripwire polygons
+                is_excluded = False
+                is_breach = False
+                for z in cam_zones:
+                    if point_in_polygon(cx, cy, z["points"]):
+                        if z["zone_type"] == "exclusion":
+                            is_excluded = True
+                            break
+                        elif z["zone_type"] == "tripwire":
+                            is_breach = True
+
+                if is_excluded:
+                    continue
+
+                det["breach"] = is_breach
+                moving_detections.append(det)
 
             moving_detections.sort(key=lambda d: d["area"], reverse=True)
             active_out, db_events = tracker.update(moving_detections)
