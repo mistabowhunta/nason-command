@@ -11,6 +11,7 @@ from app.api.ws import router as ws_router, telemetry_and_cv_broadcaster
 from app.db.session import init_db, AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone
 from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, SNAPSHOT_DIR
+from app.agent.orchestrator import deep_inspect_detection, process_command_prompt
 
 STREAMS = ["annke_1", "tapo_1", "tapo_2"]
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -24,8 +25,12 @@ class PointDTO(BaseModel):
 class CreateZoneDTO(BaseModel):
     camera_id: str
     name: str
-    zone_type: str  # 'exclusion' or 'tripwire'
+    zone_type: str
     points: list[PointDTO]
+
+
+class AgentCommandDTO(BaseModel):
+    prompt: str
 
 
 async def sync_zones_to_engine(cv_engine: EdgeCVEngine):
@@ -128,6 +133,17 @@ async def get_recent_detections(limit: int = 30):
                 "confidence": r.confidence,
                 "crop_url": f"/snapshots/crop_{r.attributes}" if r.attributes else None,
                 "full_url": f"/snapshots/full_{r.attributes}" if r.attributes else None,
+                "ai_notes": r.ai_notes,
             }
             for r in rows
         ]
+
+
+@app.post("/api/detections/{event_id}/inspect")
+async def inspect_detection_endpoint(event_id: int):
+    return await deep_inspect_detection(event_id)
+
+
+@app.post("/api/agent/command")
+async def agent_command_endpoint(payload: AgentCommandDTO):
+    return await process_command_prompt(payload.prompt)

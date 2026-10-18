@@ -35,6 +35,7 @@ export interface PersistedDetectionEvent {
   confidence: number;
   crop_url: string | null;
   full_url: string | null;
+  ai_notes?: string | null;
 }
 
 export interface TelemetryHeartbeat {

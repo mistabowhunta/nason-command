@@ -25,6 +25,7 @@ class DetectionEvent(Base):
     bbox_y: Mapped[float] = mapped_column(Float)
     bbox_w: Mapped[float] = mapped_column(Float)
     bbox_h: Mapped[float] = mapped_column(Float)
+    ai_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class CameraZone(Base):
@@ -33,5 +34,5 @@ class CameraZone(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     camera_id: Mapped[str] = mapped_column(String(50), index=True)
     name: Mapped[str] = mapped_column(String(64))
-    zone_type: Mapped[str] = mapped_column(String(32))  # 'exclusion' or 'tripwire'
-    points_json: Mapped[str] = mapped_column(Text)      # JSON list of {"x": float, "y": float}
+    zone_type: Mapped[str] = mapped_column(String(32))
+    points_json: Mapped[str] = mapped_column(Text)

@@ -3,6 +3,7 @@ import { useTelemetryWs } from './hooks/useTelemetryWs';
 import { StatusHeader } from './components/StatusHeader';
 import { VideoTile } from './components/VideoTile';
 import { EvidenceRail } from './components/EvidenceRail';
+import { CommandPrompt } from './components/CommandPrompt';
 import type { CameraZone } from './types/telemetry';
 import { LayoutGrid, PanelRightClose, PanelRightOpen } from 'lucide-react';
 
@@ -18,6 +19,7 @@ export default function App() {
   const { telemetry, status } = useTelemetryWs(`ws://${HOST_IP}:8080/ws/telemetry`);
   const [focusedStream, setFocusedStream] = useState<string | null>(null);
   const [showRail, setShowRail] = useState<boolean>(true);
+  const [railRefresh, setRailRefresh] = useState<number>(0);
   const [zonesByCam, setZonesByCam] = useState<Record<string, CameraZone[]>>({});
   const detections = telemetry?.detections || {};
 
@@ -113,8 +115,14 @@ export default function App() {
           )}
         </div>
 
-        {showRail && <EvidenceRail hostIp={HOST_IP} />}
+        {showRail && <EvidenceRail hostIp={HOST_IP} refreshTrigger={railRefresh} />}
       </div>
+
+      <CommandPrompt
+        hostIp={HOST_IP}
+        onFocusStream={setFocusedStream}
+        onRefreshRail={() => setRailRefresh((prev) => prev + 1)}
+      />
     </div>
   );
 }
