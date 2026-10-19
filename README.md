@@ -121,7 +121,7 @@ flowchart TB
 2. **Eliminating RTSP Buffer Lag During CPU Inference:**
    Standard `cv2.VideoCapture.read()` loops block while ONNX inference executes, causing TCP RTSP buffers to accumulate multi-second delays. Solved by decoupling stream ingestion into a dedicated `LatestFrameGrabber` daemon thread per camera that continuously drains the socket, guaranteeing the CV worker always evaluates the `0ms` live frame.
 3. **Preventing Event-Loop & Media Starvation on 4-Core Hardware:**
-   Capped OpenCV internal threads (`cv2.setNumThreads(1)`), gated YOLOv8n execution behind an ultra-fast `0.5ms` `MOG2` pixel-motion check, serialized ONNX Runtime calls with a thread lock (`intra_op_num_threads=2`), and offloaded PostgreSQL `asyncpg` writes to a non-blocking `asyncio.Queue`.
+   Capped OpenCV internal threads (`cv2.setNumThreads(1)`), gated YOLOv8n execution behind an ultra-fast `0.5ms` `MOG2` pixel-motion check, serialized ONNX Runtime calls with a thread lock (`intra_op_num_threads=2`) and offloaded PostgreSQL `asyncpg` writes to a non-blocking `asyncio.Queue`.
 
 ---
 
