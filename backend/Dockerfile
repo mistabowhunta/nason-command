@@ -16,10 +16,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN pip install --no-cache-dir ultralytics onnx
 
-# Generate yolov8n.onnx natively via Python on disk during build
-RUN python -c "from ultralytics import YOLO; model = YOLO('yolov8n.pt'); model.export(format='onnx', imgsz=640)" && \
+# Generate yolov8s.onnx natively via Python on disk during build
+RUN python -c "from ultralytics import YOLO; model = YOLO('yolov8s.pt'); model.export(format='onnx', imgsz=640)" && \
     mkdir -p /app/models && \
-    mv yolov8n.onnx /app/models/yolov8n.onnx
+    mv yolov8s.onnx /app/models/yolov8s.onnx
 
 COPY ./app /app/app
 

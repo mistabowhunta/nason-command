@@ -10,7 +10,7 @@ import { LayoutGrid, PanelRightClose, PanelRightOpen } from 'lucide-react';
 const HOST_IP = window.location.hostname || '192.168.1.27';
 
 const CAMERAS = [
-  { title: 'GARAGE', streamName: 'annke_1' },
+  { title: 'GARAGE / DRIVEWAY', streamName: 'annke_1' },
   { title: 'EXTERIOR 1', streamName: 'tapo_1' },
   { title: 'EXTERIOR 2', streamName: 'tapo_2' },
 ];
@@ -21,6 +21,7 @@ export default function App() {
   const [showRail, setShowRail] = useState<boolean>(true);
   const [railRefresh, setRailRefresh] = useState<number>(0);
   const [zonesByCam, setZonesByCam] = useState<Record<string, CameraZone[]>>({});
+  const [pausedCams, setPausedCams] = useState<string[]>([]);
   const detections = telemetry?.detections || {};
 
   useEffect(() => {
@@ -28,7 +29,26 @@ export default function App() {
       .then((res) => (res.ok ? res.json() : {}))
       .then((data) => setZonesByCam(data))
       .catch((err) => console.error('Failed to load camera zones:', err));
+
+    fetch(`http://${HOST_IP}:8080/api/cameras/paused`)
+      .then((res) => (res.ok ? res.json() : { paused: [] }))
+      .then((data) => setPausedCams(data.paused || []))
+      .catch((err) => console.error('Failed to load paused cameras:', err));
   }, []);
+
+  const togglePauseCam = async (streamName: string) => {
+    try {
+      const res = await fetch(`http://${HOST_IP}:8080/api/cameras/${streamName}/pause`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPausedCams(data.paused || []);
+      }
+    } catch (err) {
+      console.error('Failed to toggle camera pause:', err);
+    }
+  };
 
   const primaryCam = CAMERAS.find((c) => c.streamName === focusedStream);
   const secondaryCams = CAMERAS.filter((c) => c.streamName !== focusedStream);
@@ -43,7 +63,7 @@ export default function App() {
             <span className="text-xs font-mono uppercase tracking-wider text-zinc-400">
               {focusedStream && primaryCam
                 ? `// THEATER FOCUS: ${primaryCam.title} (${primaryCam.streamName})`
-                : '// TACTICAL MATRIX (3 ACTIVE FEEDS)'}
+                : '// TACTICAL MATRIX (YOLOv8s + RTX 3060 Ti VLM)'}
             </span>
 
             <div className="flex items-center gap-2">
@@ -76,6 +96,8 @@ export default function App() {
                   detections={detections[primaryCam.streamName] || []}
                   zones={zonesByCam[primaryCam.streamName] || []}
                   onZonesUpdated={setZonesByCam}
+                  isPaused={pausedCams.includes(primaryCam.streamName)}
+                  onTogglePause={() => togglePauseCam(primaryCam.streamName)}
                   isFocused={true}
                   onToggleFocus={() => setFocusedStream(null)}
                 />
@@ -90,6 +112,8 @@ export default function App() {
                     detections={detections[cam.streamName] || []}
                     zones={zonesByCam[cam.streamName] || []}
                     onZonesUpdated={setZonesByCam}
+                    isPaused={pausedCams.includes(cam.streamName)}
+                    onTogglePause={() => togglePauseCam(cam.streamName)}
                     isFocused={false}
                     onToggleFocus={() => setFocusedStream(cam.streamName)}
                   />
@@ -107,6 +131,8 @@ export default function App() {
                   detections={detections[cam.streamName] || []}
                   zones={zonesByCam[cam.streamName] || []}
                   onZonesUpdated={setZonesByCam}
+                  isPaused={pausedCams.includes(cam.streamName)}
+                  onTogglePause={() => togglePauseCam(cam.streamName)}
                   isFocused={false}
                   onToggleFocus={() => setFocusedStream(cam.streamName)}
                 />

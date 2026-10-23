@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import json
 import os
 from contextlib import asynccontextmanager
@@ -6,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, text
 from app.api.ws import router as ws_router, telemetry_and_cv_broadcaster
 from app.db.session import init_db, AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone
@@ -88,6 +89,17 @@ async def health_check():
     return {"status": "ONLINE", "system": "NasonNation | Command"}
 
 
+@app.get("/api/cameras/paused")
+async def get_paused_cameras():
+    return {"paused": app.state.cv_engine.get_paused_cameras()}
+
+
+@app.post("/api/cameras/{camera_id}/pause")
+async def toggle_pause_camera(camera_id: str):
+    paused = app.state.cv_engine.toggle_pause_camera(camera_id)
+    return {"paused": paused}
+
+
 @app.get("/api/zones")
 async def get_zones():
     return await sync_zones_to_engine(app.state.cv_engine)
@@ -137,6 +149,19 @@ async def get_recent_detections(limit: int = 30):
             }
             for r in rows
         ]
+
+
+@app.delete("/api/detections")
+async def purge_all_detections():
+    for f in glob.glob(f"{SNAPSHOT_DIR}/*.jpg"):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
+        await session.commit()
+    return {"status": "PURGED"}
 
 
 @app.post("/api/detections/{event_id}/inspect")

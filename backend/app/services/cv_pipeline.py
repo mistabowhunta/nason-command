@@ -9,11 +9,12 @@ import numpy as np
 import onnxruntime as ort
 from app.db.session import AsyncSessionLocal
 from app.db.models import DetectionEvent
+from app.agent.orchestrator import deep_inspect_detection
 
 cv2.setNumThreads(1)
 
 RTSP_BASE = os.getenv("MEDIAMTX_RTSP_BASE", "rtsp://mediamtx:8554")
-MODEL_PATH = "/app/models/yolov8n.onnx"
+MODEL_PATH = "/app/models/yolov8s.onnx" if os.path.exists("/app/models/yolov8s.onnx") else "/app/models/yolov8n.onnx"
 SNAPSHOT_DIR = "/tmp/command_snapshots"
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
@@ -27,13 +28,16 @@ YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
     14: ("animal", "bird"),
     15: ("animal", "cat"),
     16: ("animal", "dog"),
-    17: ("animal", "horse"),
-    21: ("animal", "bear"),
+}
+
+MIN_CONF_BY_CATEGORY = {
+    "person": 0.56,
+    "vehicle": 0.58,
+    "animal": 0.65,
 }
 
 
 def point_in_polygon(x: float, y: float, poly: list[dict]) -> bool:
-    """Ray-casting algorithm to test if normalized point (x, y) is inside a polygon."""
     n = len(poly)
     if n < 3:
         return False
@@ -52,6 +56,63 @@ def point_in_polygon(x: float, y: float, poly: list[dict]) -> bool:
                         inside = not inside
         p1x, p1y = p2x, p2y
     return inside
+
+
+def bbox_intersection_ratio(det: dict, motion_boxes: list[tuple[float, float, float, float]]) -> float:
+    dx1, dy1, dx2, dy2 = det["x"], det["y"], det["x"] + det["w"], det["y"] + det["h"]
+    det_area = max(0.0001, det["w"] * det["h"])
+    overlap_sum = 0.0
+    for mx, my, mw, mh in motion_boxes:
+        mx2, my2 = mx + mw, my + mh
+        ix1, iy1 = max(dx1, mx), max(dy1, my)
+        ix2, iy2 = min(dx2, mx2), min(dy2, my2)
+        if ix2 > ix1 and iy2 > iy1:
+            overlap_sum += (ix2 - ix1) * (iy2 - iy1)
+    return min(1.0, overlap_sum / det_area)
+
+
+class ParkedObjectFilter:
+    def __init__(self):
+        self.anchors: list[dict] = []
+
+    def is_truly_moving(self, det: dict, motion_ratio: float) -> bool:
+        now = time.time()
+        cx = det["x"] + det["w"] / 2.0
+        cy = det["y"] + det["h"] / 2.0
+
+        self.anchors = [a for a in self.anchors if now - a["last_seen"] < 600.0]
+
+        for a in self.anchors:
+            if a["category"] != det["category"]:
+                continue
+            dist = math.hypot(cx - a["origin_cx"], cy - a["origin_cy"])
+            if dist < 0.035:
+                a["last_seen"] = now
+                a["frames_stationary"] += 1
+                if det["category"] == "vehicle":
+                    return False
+                if a["frames_stationary"] > 10 and motion_ratio < 0.25:
+                    return False
+                return True
+
+        if det["category"] == "vehicle" and motion_ratio < 0.24:
+            self.anchors.append({
+                "category": det["category"],
+                "origin_cx": cx,
+                "origin_cy": cy,
+                "last_seen": now,
+                "frames_stationary": 5,
+            })
+            return False
+
+        self.anchors.append({
+            "category": det["category"],
+            "origin_cx": cx,
+            "origin_cy": cy,
+            "last_seen": now,
+            "frames_stationary": 1,
+        })
+        return True
 
 
 class LatestFrameGrabber:
@@ -108,7 +169,7 @@ class CameraMotionTracker:
         }
 
         if not raw_detections:
-            if now - self.last_valid_time < 0.4:
+            if now - self.last_valid_time < 0.35:
                 return self.last_valid_boxes, []
             self.last_valid_boxes = []
             return [], []
@@ -133,12 +194,15 @@ class CameraMotionTracker:
 
             if best_slot is not None:
                 used_slots.add(best_slot)
+                prev_hits = self.active_tracks[best_slot].get("hits", 1) + 1
                 self.active_tracks[best_slot] = {
                     "cx": cx,
                     "cy": cy,
                     "category": det["category"],
                     "last_seen": now,
+                    "hits": prev_hits,
                 }
+                det["hits"] = prev_hits
                 assigned.append((best_slot, det))
                 unmatched_dets.remove(det)
 
@@ -154,7 +218,9 @@ class CameraMotionTracker:
                 "cy": cy,
                 "category": det["category"],
                 "last_seen": now,
+                "hits": 1,
             }
+            det["hits"] = 1
             assigned.append((slot, det))
 
         assigned.sort(key=lambda item: item[0])
@@ -162,6 +228,9 @@ class CameraMotionTracker:
         new_db_events = []
 
         for slot, det in assigned:
+            if det.get("hits", 1) < 2:
+                continue
+
             slot_name = f"Motion_{slot}"
             is_breach = bool(det.get("breach", False))
             suffix = "_BREACH" if is_breach else ""
@@ -182,7 +251,7 @@ class CameraMotionTracker:
             }
             active_output.append(box_item)
 
-            dedupe_key = f"{full_label}_{int(now // 10)}"
+            dedupe_key = f"{full_label}_{int(now // 15)}"
             if dedupe_key not in self.logged_track_keys:
                 self.logged_track_keys.add(dedupe_key)
                 if len(self.logged_track_keys) > 200:
@@ -202,10 +271,12 @@ class EdgeCVEngine:
         self.running = True
         self.latest_detections: dict[str, list[dict]] = {s: [] for s in streams}
         self.zones: dict[str, list[dict]] = {s: [] for s in streams}
+        self.paused_persistence: set[str] = set()
         self.zones_lock = threading.Lock()
         self.grabbers: list[LatestFrameGrabber] = []
         self.infer_lock = threading.Lock()
 
+        print(f"[CV ENGINE] Loading ONNX model: {MODEL_PATH}")
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 2
         sess_opts.inter_op_num_threads = 1
@@ -213,6 +284,22 @@ class EdgeCVEngine:
             MODEL_PATH, sess_options=sess_opts, providers=["CPUExecutionProvider"]
         )
         self.input_name = self.ort_session.get_inputs()[0].name
+
+    def toggle_pause_camera(self, camera_id: str) -> list[str]:
+        with self.zones_lock:
+            if camera_id in self.paused_persistence:
+                self.paused_persistence.remove(camera_id)
+            else:
+                self.paused_persistence.add(camera_id)
+            return list(self.paused_persistence)
+
+    def get_paused_cameras(self) -> list[str]:
+        with self.zones_lock:
+            return list(self.paused_persistence)
+
+    def is_camera_paused(self, camera_id: str) -> bool:
+        with self.zones_lock:
+            return camera_id in self.paused_persistence
 
     def set_zones(self, zones_by_cam: dict[str, list[dict]]):
         with self.zones_lock:
@@ -247,7 +334,7 @@ class EdgeCVEngine:
         best_class_idxs = np.argmax(class_scores, axis=1)
         best_scores = class_scores[np.arange(len(preds)), best_class_idxs]
 
-        mask = (best_scores > 0.40) & np.isin(best_class_idxs, target_ids)
+        mask = (best_scores > 0.54) & np.isin(best_class_idxs, target_ids)
         filtered_preds = preds[mask]
         filtered_scores = best_scores[mask]
         filtered_classes = best_class_idxs[mask]
@@ -262,7 +349,7 @@ class EdgeCVEngine:
             y1 = float((cy - h / 2.0) / 640.0)
             boxes_xywh.append([x1, y1, float(w / 640.0), float(h / 640.0)])
 
-        indices = cv2.dnn.NMSBoxes(boxes_xywh, filtered_scores.tolist(), 0.40, 0.45)
+        indices = cv2.dnn.NMSBoxes(boxes_xywh, filtered_scores.tolist(), 0.54, 0.45)
         results = []
         if len(indices) > 0:
             for idx in np.array(indices).flatten():
@@ -272,13 +359,25 @@ class EdgeCVEngine:
                 w, h = min(1.0 - x, w), min(1.0 - y, h)
                 cls_id = int(filtered_classes[i])
                 category, sub_type = YOLO_CLASS_MAP[cls_id]
+                conf = float(filtered_scores[i])
+
+                if conf < MIN_CONF_BY_CATEGORY.get(category, 0.56):
+                    continue
+
+                area = w * h
+                if category == "person" and (h < 0.08 or area < 0.0038):
+                    continue
+                if category == "vehicle" and (w < 0.07 or area < 0.0065):
+                    continue
+                if category == "animal" and area < 0.003:
+                    continue
 
                 results.append({
                     "category": category,
                     "sub_type": sub_type,
-                    "confidence": float(filtered_scores[i]),
+                    "confidence": conf,
                     "x": x, "y": y, "w": w, "h": h,
-                    "area": w * h,
+                    "area": area,
                 })
         return results
 
@@ -296,8 +395,8 @@ class EdgeCVEngine:
 
             crop = frame[y1:y2, x1:x2]
             if crop.size > 0:
-                cv2.imwrite(f"{SNAPSHOT_DIR}/crop_{snap_id}", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-            cv2.imwrite(f"{SNAPSHOT_DIR}/full_{snap_id}", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+                cv2.imwrite(f"{SNAPSHOT_DIR}/crop_{snap_id}", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+            cv2.imwrite(f"{SNAPSHOT_DIR}/full_{snap_id}", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84])
             ev["attributes"] = snap_id
 
     def _worker(self, stream_name: str):
@@ -305,25 +404,28 @@ class EdgeCVEngine:
         grabber = LatestFrameGrabber(rtsp_url)
         self.grabbers.append(grabber)
 
-        bg_sub = cv2.createBackgroundSubtractorMOG2(history=400, varThreshold=20, detectShadows=False)
+        bg_sub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=32, detectShadows=False)
         tracker = CameraMotionTracker()
+        parked_filter = ParkedObjectFilter()
         last_processed_time = 0.0
 
         while self.running:
-            time.sleep(0.18)
+            time.sleep(0.20)
             frame, f_time = grabber.get_latest()
             if frame is None or f_time <= last_processed_time:
                 continue
             last_processed_time = f_time
 
             small = cv2.resize(frame, (640, 360))
-            fg_mask = bg_sub.apply(small, learningRate=0.002)
+            small_blur = cv2.GaussianBlur(small, (5, 5), 0)
+            fg_mask = bg_sub.apply(small_blur, learningRate=0.003)
+            fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
             fg_mask = cv2.dilate(fg_mask, None, iterations=2)
             contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             motion_boxes = []
             for c in contours:
-                if cv2.contourArea(c) < 160:
+                if cv2.contourArea(c) < 280:
                     continue
                 mx, my, mw, mh = cv2.boundingRect(c)
                 motion_boxes.append((mx / 640.0, my / 360.0, mw / 640.0, mh / 360.0))
@@ -338,21 +440,16 @@ class EdgeCVEngine:
             moving_detections = []
 
             for det in yolo_dets:
-                # Legacy fallback exclusion for garage tree skirt until drawn via UI
-                if stream_name == "annke_1" and det["category"] == "animal" and (0.48 < det["x"] < 0.82 and 0.38 < det["y"] < 0.85):
+                motion_ratio = bbox_intersection_ratio(det, motion_boxes)
+                if motion_ratio < 0.14:
                     continue
 
-                xmin, ymin, xmax, ymax = det["x"], det["y"], det["x"] + det["w"], det["y"] + det["h"]
-                if not any(
-                    not (xmax < mx or xmin > mx + mw or ymax < my or ymin > my + mh)
-                    for (mx, my, mw, mh) in motion_boxes
-                ):
+                if not parked_filter.is_truly_moving(det, motion_ratio):
                     continue
 
                 cx = det["x"] + det["w"] / 2.0
                 cy = det["y"] + det["h"] / 2.0
 
-                # Check user-defined Exclusion & Tripwire polygons
                 is_excluded = False
                 is_breach = False
                 for z in cam_zones:
@@ -373,7 +470,7 @@ class EdgeCVEngine:
             active_out, db_events = tracker.update(moving_detections)
             self.latest_detections[stream_name] = active_out
 
-            if db_events:
+            if db_events and not self.is_camera_paused(stream_name):
                 self._save_snapshots(stream_name, frame, db_events)
                 asyncio.run_coroutine_threadsafe(
                     self.event_queue.put((stream_name, db_events)), self.loop
@@ -384,6 +481,7 @@ async def db_persistence_worker(event_queue: asyncio.Queue):
     while True:
         stream_name, events = await event_queue.get()
         try:
+            inserted_ids = []
             async with AsyncSessionLocal() as session:
                 for ev in events:
                     row = DetectionEvent(
@@ -401,6 +499,11 @@ async def db_persistence_worker(event_queue: asyncio.Queue):
                         bbox_h=ev["h"],
                     )
                     session.add(row)
+                    await session.flush()
+                    inserted_ids.append(row.id)
                 await session.commit()
+
+            for ev_id in inserted_ids:
+                asyncio.create_task(deep_inspect_detection(ev_id))
         except Exception as e:
             print(f"[DB ERROR] Failed to persist detection: {e}")

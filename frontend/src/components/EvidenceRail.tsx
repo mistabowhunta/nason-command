@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { PersistedDetectionEvent } from '../types/telemetry';
-import { Camera, Clock, Cpu, Eye, Sparkles, X } from 'lucide-react';
+import { Camera, Clock, Cpu, Eye, Sparkles, Trash2, X } from 'lucide-react';
 
 interface EvidenceRailProps {
   hostIp: string;
@@ -37,6 +37,18 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
     return () => window.clearInterval(timer);
   }, [apiBase, refreshTrigger]);
 
+  const handlePurgeAll = async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/detections`, { method: 'DELETE' });
+      if (res.ok) {
+        setEvents([]);
+        setSelectedEvent(null);
+      }
+    } catch (err) {
+      console.error('Failed to purge detections:', err);
+    }
+  };
+
   const handleDeepInspect = async (e: React.MouseEvent, evId: number) => {
     e.stopPropagation();
     setInspectingId(evId);
@@ -46,11 +58,16 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
       });
       if (res.ok) {
         const data = await res.json();
-        setEvents((prev) =>
-          prev.map((item) => (item.id === evId ? { ...item, ai_notes: data.ai_notes } : item))
-        );
-        if (selectedEvent && selectedEvent.id === evId) {
-          setSelectedEvent({ ...selectedEvent, ai_notes: data.ai_notes });
+        if (data.purged) {
+          setEvents((prev) => prev.filter((item) => item.id !== evId));
+          setSelectedEvent(null);
+        } else {
+          setEvents((prev) =>
+            prev.map((item) => (item.id === evId ? { ...item, ai_notes: data.ai_notes } : item))
+          );
+          if (selectedEvent && selectedEvent.id === evId) {
+            setSelectedEvent({ ...selectedEvent, ai_notes: data.ai_notes });
+          }
         }
       }
     } catch (err) {
@@ -63,16 +80,23 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
   return (
     <>
       <aside className="w-80 border-l border-zinc-800 bg-zinc-900/60 flex flex-col h-[calc(100vh-105px)] sticky top-[53px]">
-        <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        <div className="px-3 py-3 border-b border-zinc-800 flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
             <Eye className="w-4 h-4 text-emerald-400" />
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-200">
-              KILL-FEED // EVIDENCE
+              KILL-FEED ({events.length})
             </span>
           </div>
-          <span className="text-[10px] font-mono bg-zinc-800 text-zinc-300 px-2 py-0.5 rounded">
-            {events.length} LOGGED
-          </span>
+          {events.length > 0 && (
+            <button
+              onClick={handlePurgeAll}
+              title="Wipe all saved snapshots and reset database history"
+              className="text-[10px] font-mono bg-red-950/80 hover:bg-red-900 text-red-300 border border-red-500/40 px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer"
+            >
+              <Trash2 className="w-3 h-3" />
+              PURGE
+            </button>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-2.5">

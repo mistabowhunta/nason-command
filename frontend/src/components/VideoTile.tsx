@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useWhepClient } from '../hooks/useWhepClient';
 import type { BoundingBoxDetection, CameraZone, ZonePoint } from '../types/telemetry';
-import { Check, Crosshair, Maximize2, Minimize2, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
+import { Check, Crosshair, Database, Maximize2, Minimize2, PauseCircle, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
 
 interface VideoTileProps {
   title: string;
@@ -10,6 +10,8 @@ interface VideoTileProps {
   detections?: BoundingBoxDetection[];
   zones?: CameraZone[];
   onZonesUpdated?: (zonesByCam: Record<string, CameraZone[]>) => void;
+  isPaused?: boolean;
+  onTogglePause?: () => void;
   isFocused?: boolean;
   onToggleFocus?: () => void;
 }
@@ -56,6 +58,8 @@ export function VideoTile({
   detections = [],
   zones = [],
   onZonesUpdated,
+  isPaused = false,
+  onTogglePause,
   isFocused = false,
   onToggleFocus,
 }: VideoTileProps) {
@@ -70,7 +74,6 @@ export function VideoTile({
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Interactive Polygon Zone Drawing State
   const [drawMode, setDrawMode] = useState<'exclusion' | 'tripwire' | null>(null);
   const [draftPoints, setDraftPoints] = useState<ZonePoint[]>([]);
   const canvasWrapRef = useRef<HTMLDivElement | null>(null);
@@ -245,7 +248,6 @@ export function VideoTile({
           : 'cursor-pointer'
       }`}
     >
-      {/* GPU-Accelerated PTZ Transform Canvas */}
       <div
         className={`w-full h-full relative origin-center ${
           isDragging ? '' : 'transition-transform duration-300 ease-out'
@@ -262,13 +264,11 @@ export function VideoTile({
           className="w-full h-full object-cover"
         />
 
-        {/* SVG Overlay: Saved Zones + Draft Polygon + Centroid Trajectory Trails */}
         <svg
           viewBox="0 0 1000 1000"
           preserveAspectRatio="none"
           className="absolute inset-0 w-full h-full pointer-events-none"
         >
-          {/* Saved Exclusion & Tripwire Polygons */}
           {zones.map((z) => {
             const pts = z.points.map((p) => `${p.x * 1000},${p.y * 1000}`).join(' ');
             const isExcl = z.zone_type === 'exclusion';
@@ -298,7 +298,6 @@ export function VideoTile({
             );
           })}
 
-          {/* Active Draft Polygon While Drawing */}
           {drawMode && draftPoints.length > 0 && (
             <g>
               <polygon
@@ -321,7 +320,6 @@ export function VideoTile({
             </g>
           )}
 
-          {/* 2.5s Target Trajectory Trails */}
           {Object.entries(trails).map(([slot, trail]) => {
             if (trail.points.length < 2) return null;
             const theme = CATEGORY_THEME[trail.category] || CATEGORY_THEME.vehicle;
@@ -351,7 +349,6 @@ export function VideoTile({
           })}
         </svg>
 
-        {/* Tactical Corner-Bracket Reticle Overlays */}
         <div className="absolute inset-0 pointer-events-none overflow-hidden">
           {detections.map((det) => {
             const theme = CATEGORY_THEME[det.category] || CATEGORY_THEME.vehicle;
@@ -399,13 +396,13 @@ export function VideoTile({
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-2 pointer-events-none">
+        <div className="flex items-center gap-1.5 pointer-events-none">
           <span className="bg-zinc-950/85 border border-zinc-800 px-2.5 py-1 rounded text-xs font-mono text-zinc-200">
             {title} <span className="text-zinc-500">({streamName})</span>
           </span>
           {hasBreach && (
             <span className="bg-red-600 text-white px-2 py-0.5 rounded text-[10px] font-mono font-bold animate-bounce">
-              ⚠️ TRIPWIRE BREACH
+              ⚠️ BREACH
             </span>
           )}
           {zoom > 1 && (
@@ -438,9 +435,23 @@ export function VideoTile({
             </>
           ) : (
             <>
+              {onTogglePause && (
+                <button
+                  onClick={onTogglePause}
+                  title={isPaused ? 'Persistence Paused (Click to Resume DB/Snapshot Logging)' : 'Logging Active (Click to Pause DB/Snapshot Logging for this camera)'}
+                  className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer transition-colors ${
+                    isPaused
+                      ? 'bg-amber-950/90 text-amber-300 border-amber-500/60'
+                      : 'bg-zinc-950/85 hover:bg-zinc-800 text-emerald-400 border-zinc-800'
+                  }`}
+                >
+                  {isPaused ? <PauseCircle className="w-3 h-3" /> : <Database className="w-3 h-3" />}
+                  {isPaused ? 'PAUSED' : 'REC'}
+                </button>
+              )}
               <button
                 onClick={() => startDrawing('exclusion')}
-                title="Draw Red Exclusion Mask (Ignore detections inside polygon)"
+                title="Draw Red Exclusion Mask"
                 className="bg-zinc-950/85 hover:bg-red-950/80 border border-zinc-800 hover:border-red-500/50 px-1.5 py-1 rounded text-[10px] font-mono text-red-300 flex items-center gap-1 cursor-pointer"
               >
                 <ShieldOff className="w-3 h-3" />
@@ -448,7 +459,7 @@ export function VideoTile({
               </button>
               <button
                 onClick={() => startDrawing('tripwire')}
-                title="Draw Amber Perimeter Tripwire (Alert when target enters polygon)"
+                title="Draw Amber Perimeter Tripwire"
                 className="bg-zinc-950/85 hover:bg-amber-950/80 border border-zinc-800 hover:border-amber-500/50 px-1.5 py-1 rounded text-[10px] font-mono text-amber-300 flex items-center gap-1 cursor-pointer"
               >
                 <ShieldAlert className="w-3 h-3" />

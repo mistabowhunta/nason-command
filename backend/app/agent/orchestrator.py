@@ -1,9 +1,10 @@
 import base64
+import json
 import os
 import cv2
 import httpx
 import numpy as np
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from app.db.session import AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone
 
@@ -11,74 +12,9 @@ WORKSTATION_GPU_URL = os.getenv("WORKSTATION_OLLAMA_URL", "http://192.168.1.223:
 SNAPSHOT_DIR = "/tmp/command_snapshots"
 
 
-def _classify_hsv_region(bgr_region: np.ndarray) -> str:
-    if bgr_region is None or bgr_region.size == 0:
-        return "indeterminate"
-    hsv = cv2.cvtColor(bgr_region, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.mean(hsv)[:3]
-    if v < 50:
-        return "black/dark-charcoal"
-    if s < 38:
-        if v > 185:
-            return "white/bright-silver"
-        return "metallic-grey/slate"
-    if h < 10 or h > 165:
-        return "red/crimson"
-    if h < 23:
-        return "orange/amber"
-    if h < 35:
-        return "yellow/gold"
-    if h < 85:
-        return "olive/green"
-    if h < 135:
-        return "navy/blue"
-    return "brown/tan"
-
-
-def run_edge_forensic_crop_analysis(ev: DetectionEvent, crop_path: str) -> str:
-    """Instant OpenCV chromatic + spatial forensic fallback when RTX 3060 Ti Ollama is offline."""
-    pos_x = "left" if ev.bbox_x < 0.35 else ("right" if ev.bbox_x > 0.65 else "center")
-    pos_y = "far-field" if ev.bbox_y < 0.35 else ("near-field" if ev.bbox_y > 0.65 else "mid-ground")
-    breach_tag = " [PERIMETER BREACH]" if "BREACH" in ev.full_label else ""
-
-    if not os.path.exists(crop_path):
-        return (
-            f"[EDGE FORENSICS]{breach_tag} {ev.sub_type.upper()} tracked in {pos_y} ({pos_x} sector), "
-            f"conf {int(ev.confidence * 100)}%."
-        )
-
-    img = cv2.imread(crop_path)
-    if img is None or img.size == 0:
-        return f"[EDGE FORENSICS]{breach_tag} Target {ev.sub_type} verified at {int(ev.confidence * 100)}% conf."
-
-    ih, iw, _ = img.shape
-    upper = img[int(ih * 0.15): int(ih * 0.50), int(iw * 0.25): int(iw * 0.75)]
-    lower = img[int(ih * 0.50): int(ih * 0.85), int(iw * 0.25): int(iw * 0.75)]
-    c_up = _classify_hsv_region(upper)
-    c_low = _classify_hsv_region(lower)
-
-    if ev.category == "person":
-        posture = "upright pedestrian" if ih > iw * 1.35 else "compact/seated or partial profile"
-        return (
-            f"[EDGE FORENSICS]{breach_tag} {posture.capitalize()} in {pos_y} ({pos_x}); "
-            f"upper garment: {c_up}, lower: {c_low} ({iw}x{ih}px crop)."
-        )
-    elif ev.category == "vehicle":
-        profile = "SUV/truck/van profile" if (ih / max(1, iw)) > 0.68 else "sedan/coupe lateral profile"
-        return (
-            f"[EDGE FORENSICS]{breach_tag} {c_low.capitalize()} {ev.sub_type} ({profile}) "
-            f"in {pos_y} {pos_x} sector; roof/cabin tone: {c_up}."
-        )
-    else:
-        return (
-            f"[EDGE FORENSICS]{breach_tag} {c_up.capitalize()} {ev.sub_type} detected in {pos_y} ({pos_x})."
-        )
-
-
 async def probe_workstation_ollama() -> tuple[bool, list[str]]:
-    """Checks if Windows 11 RTX 3060 Ti Ollama server is reachable on LAN."""
     try:
-        async with httpx.AsyncClient(timeout=0.75) as client:
+        async with httpx.AsyncClient(timeout=0.8) as client:
             res = await client.get(f"{WORKSTATION_GPU_URL}/api/tags")
             if res.status_code == 200:
                 models = [m["name"] for m in res.json().get("models", [])]
@@ -88,8 +24,17 @@ async def probe_workstation_ollama() -> tuple[bool, list[str]]:
     return False, []
 
 
+def pick_best_vlm(models: list[str]) -> str | None:
+    """Prioritizes qwen2.5vl over legacy llava models."""
+    for preferred in ("qwen2.5vl", "qwen2-vl", "minicpm-v", "llama3.2-vision", "llava"):
+        for m in models:
+            if preferred in m.lower():
+                return m
+    return None
+
+
 async def deep_inspect_detection(event_id: int) -> dict:
-    """Runs VLM on RTX 3060 Ti if online; otherwise runs local Edge Forensics."""
+    """Runs VLM on RTX 3060 Ti to extract accurate paint/clothing color, type, and purge false positives."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(DetectionEvent).where(DetectionEvent.id == event_id))
         ev = result.scalar_one_or_none()
@@ -98,78 +43,86 @@ async def deep_inspect_detection(event_id: int) -> dict:
 
         crop_path = f"{SNAPSHOT_DIR}/crop_{ev.attributes}" if ev.attributes else ""
         gpu_online, models = await probe_workstation_ollama()
+        chosen_vlm = pick_best_vlm(models) if gpu_online else None
 
-        vlm_models = [m for m in models if any(k in m.lower() for k in ("vision", "llava", "moondream", "vl", "minicpm"))]
-        notes = None
-
-        if gpu_online and vlm_models and os.path.exists(crop_path):
-            chosen_vlm = vlm_models[0]
+        if chosen_vlm and os.path.exists(crop_path):
             try:
                 with open(crop_path, "rb") as f:
                     b64_img = base64.b64encode(f.read()).decode("utf-8")
+
                 prompt = (
-                    f"You are a tactical security VLM analyzing a camera crop from '{ev.camera_id}'. "
-                    f"Detected class: {ev.category} ({ev.sub_type}). "
-                    "In 1 concise sentence (max 22 words), describe the subject's color, type/clothing, and orientation."
+                    f"Analyze this security camera crop from '{ev.camera_id}' (initial detector guess: {ev.category}). "
+                    "Ignore window screen mesh and tree shadows. "
+                    "Respond ONLY with valid JSON in this exact format: "
+                    '{"valid_target": true, "category": "person|vehicle|animal|false_alarm", '
+                    '"summary": "Concise 10-18 word description of true body/clothing color, vehicle type, and action"}'
                 )
-                async with httpx.AsyncClient(timeout=12.0) as client:
+
+                async with httpx.AsyncClient(timeout=15.0) as client:
                     resp = await client.post(
                         f"{WORKSTATION_GPU_URL}/api/generate",
                         json={
                             "model": chosen_vlm,
                             "prompt": prompt,
                             "images": [b64_img],
+                            "format": "json",
                             "stream": False,
+                            "options": {"temperature": 0.1},
                         },
                     )
                     if resp.status_code == 200:
                         raw_text = resp.json().get("response", "").strip()
-                        if raw_text:
-                            notes = f"[RTX 3060 Ti // {chosen_vlm}] {raw_text}"
+                        parsed = json.loads(raw_text)
+                        valid = bool(parsed.get("valid_target", True))
+                        vlm_cat = str(parsed.get("category", ev.category)).lower()
+                        summary = str(parsed.get("summary", "")).strip()
+
+                        if not valid or vlm_cat == "false_alarm":
+                            await session.execute(delete(DetectionEvent).where(DetectionEvent.id == ev.id))
+                            await session.commit()
+                            return {"id": ev.id, "purged": True, "ai_notes": "Purged false positive via RTX 3060 Ti VLM"}
+
+                        if vlm_cat in ("person", "vehicle", "animal") and vlm_cat != ev.category:
+                            ev.category = vlm_cat
+                            ev.full_label = f"{ev.motion_slot}_{vlm_cat}"
+
+                        ev.ai_notes = f"[RTX 3060 Ti // {chosen_vlm}] {summary}"
+                        await session.commit()
+                        return {"id": ev.id, "ai_notes": ev.ai_notes, "engine": f"RTX 3060 Ti // {chosen_vlm}"}
             except Exception as e:
-                print(f"[VLM FALLBACK] Ollama vision call failed: {e}")
+                print(f"[VLM ERROR] {e}")
 
-        if not notes:
-            notes = run_edge_forensic_crop_analysis(ev, crop_path)
-
-        ev.ai_notes = notes
+        ev.ai_notes = (
+            f"[UNVERIFIED EDGE CROP] {ev.sub_type.upper()} ({int(ev.confidence * 100)}% conf) — "
+            "Start Ollama (qwen2.5vl:7b) on 192.168.1.223 for GPU color/object verification."
+        )
         await session.commit()
-        return {
-            "id": ev.id,
-            "ai_notes": notes,
-            "engine": "RTX_3060_TI_OLLAMA" if (gpu_online and vlm_models) else "EDGE_OPENCV_FORENSICS",
-        }
+        return {"id": ev.id, "ai_notes": ev.ai_notes, "engine": "EDGE_FALLBACK"}
 
 
 async def process_command_prompt(prompt: str) -> dict:
-    """Deterministic tool-calling & natural language query engine for Command."""
     clean = prompt.strip()
     low = clean.lower()
-    ui_action = None
 
-    # 1. Check direct UI layout / camera switching intents
     if any(k in low for k in ("grid", "all cam", "matrix", "reset view", "unfocus")):
-        ui_action = {"type": "SET_FOCUS", "stream": None}
         return {
             "reply": "Restored 3-camera Tactical Matrix view.",
             "engine": "DETERMINISTIC_TOOL",
-            "ui_action": ui_action,
+            "ui_action": {"type": "SET_FOCUS", "stream": None},
         }
 
     for alias, stream in [
-        ("garage", "annke_1"), ("annke", "annke_1"),
+        ("garage", "annke_1"), ("driveway", "annke_1"), ("annke", "annke_1"),
         ("exterior 1", "tapo_1"), ("ext 1", "tapo_1"), ("tapo_1", "tapo_1"), ("tapo 1", "tapo_1"),
         ("exterior 2", "tapo_2"), ("ext 2", "tapo_2"), ("tapo_2", "tapo_2"), ("tapo 2", "tapo_2"),
     ]:
         if alias in low and any(v in low for v in ("focus", "maximize", "pull up", "show", "theater", "zoom", "open")):
-            ui_action = {"type": "SET_FOCUS", "stream": stream}
             return {
                 "reply": f"Promoted {stream.upper()} to primary Theater Mode viewport.",
                 "engine": "DETERMINISTIC_TOOL",
-                "ui_action": ui_action,
+                "ui_action": {"type": "SET_FOCUS", "stream": stream},
             }
 
-    # 2. Check "inspect latest" intent
     if "inspect" in low:
         async with AsyncSessionLocal() as session:
             res = await session.execute(
@@ -180,12 +133,11 @@ async def process_command_prompt(prompt: str) -> dict:
             return {"reply": "No logged detection events available to inspect yet.", "engine": "DETERMINISTIC_TOOL"}
         insp = await deep_inspect_detection(latest.id)
         return {
-            "reply": f"Inspected Event #{latest.id} ({latest.camera_id} - {latest.full_label}): {insp.get('ai_notes')}",
-            "engine": insp.get("engine", "EDGE_FORENSICS"),
+            "reply": f"Inspected Event #{latest.id}: {insp.get('ai_notes')}",
+            "engine": insp.get("engine", "RTX_3060_TI"),
             "ui_action": {"type": "REFRESH_RAIL"},
         }
 
-    # 3. Gather live PostgreSQL telemetry context for analytical questions
     async with AsyncSessionLocal() as session:
         total_res = await session.execute(
             select(DetectionEvent.category, func.count(DetectionEvent.id)).group_by(DetectionEvent.category)
@@ -201,12 +153,11 @@ async def process_command_prompt(prompt: str) -> dict:
             select(DetectionEvent).order_by(DetectionEvent.timestamp.desc()).limit(5)
         )
         recent_rows = recent_res.scalars().all()
-
         zone_res = await session.execute(select(CameraZone))
         zones = zone_res.scalars().all()
 
     gpu_online, models = await probe_workstation_ollama()
-    text_models = [m for m in models if not any(k in m.lower() for k in ("llava", "moondream"))]
+    text_models = [m for m in models if "qwen" in m.lower() or "llama" in m.lower()]
 
     recent_summary = "; ".join(
         [
@@ -215,7 +166,6 @@ async def process_command_prompt(prompt: str) -> dict:
         ]
     ) or "None"
 
-    # 4. If RTX 3060 Ti Ollama has an LLM loaded, route natural language with live DB context
     if gpu_online and text_models:
         chosen_llm = text_models[0]
         sys_context = (
@@ -228,12 +178,7 @@ async def process_command_prompt(prompt: str) -> dict:
             async with httpx.AsyncClient(timeout=8.0) as client:
                 resp = await client.post(
                     f"{WORKSTATION_GPU_URL}/api/generate",
-                    json={
-                        "model": chosen_llm,
-                        "system": sys_context,
-                        "prompt": clean,
-                        "stream": False,
-                    },
+                    json={"model": chosen_llm, "system": sys_context, "prompt": clean, "stream": False},
                 )
                 if resp.status_code == 200:
                     ans = resp.json().get("response", "").strip()
@@ -242,27 +187,12 @@ async def process_command_prompt(prompt: str) -> dict:
         except Exception:
             pass
 
-    # 5. Built-in SQL Telemetry Responder (Instant 0ms fallback)
     total_all = sum(counts.values())
-    p_cnt = counts.get("person", 0)
-    v_cnt = counts.get("vehicle", 0)
-    a_cnt = counts.get("animal", 0)
-
-    if "breach" in low or "tripwire" in low or "zone" in low:
-        return {
-            "reply": (
-                f"PERIMETER STATUS: {len(zones)} active polygon zones configured across cameras. "
-                f"{breach_count} tripwire breach events recorded in PostgreSQL."
-            ),
-            "engine": "SQL_TELEMETRY_ENGINE",
-        }
-
     return {
         "reply": (
-            f"TELEMETRY LOG SUMMARY: {total_all} total targets persisted "
-            f"(Person: {p_cnt} | Vehicle: {v_cnt} | Animal: {a_cnt} | Breaches: {breach_count}). "
-            f"Latest activity: {recent_summary}. "
-            f"[Workstation RTX 3060 Ti Ollama ({WORKSTATION_GPU_URL}): {'ONLINE' if gpu_online else 'STANDBY - Using Local Edge Engine'}]"
+            f"TELEMETRY SUMMARY: {total_all} verified events "
+            f"(Person: {counts.get('person', 0)} | Vehicle: {counts.get('vehicle', 0)} | Animal: {counts.get('animal', 0)} | Breaches: {breach_count}). "
+            f"Recent: {recent_summary}."
         ),
         "engine": "SQL_TELEMETRY_ENGINE",
     }
