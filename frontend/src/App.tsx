@@ -4,24 +4,25 @@ import { StatusHeader } from './components/StatusHeader';
 import { VideoTile } from './components/VideoTile';
 import { EvidenceRail } from './components/EvidenceRail';
 import { CommandPrompt } from './components/CommandPrompt';
-import type { CameraZone } from './types/telemetry';
-import { LayoutGrid, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import type { CameraScheduleConfig, CameraZone } from './types/telemetry';
+import { Camera, Eye, LayoutGrid, PanelRightClose, PanelRightOpen } from 'lucide-react';
 
 const HOST_IP = window.location.hostname || '192.168.1.27';
 
 const CAMERAS = [
-  { title: 'GARAGE / DRIVEWAY', streamName: 'annke_1' },
-  { title: 'EXTERIOR 1', streamName: 'tapo_1' },
-  { title: 'EXTERIOR 2', streamName: 'tapo_2' },
+  { title: 'DRIVEWAY', streamName: 'annke_1' },
+  { title: 'LOFT', streamName: 'tapo_1' },
+  { title: 'LIVING_ROOM', streamName: 'tapo_2' },
 ];
 
 export default function App() {
   const { telemetry, status } = useTelemetryWs(`ws://${HOST_IP}:8080/ws/telemetry`);
   const [focusedStream, setFocusedStream] = useState<string | null>(null);
   const [showRail, setShowRail] = useState<boolean>(true);
+  const [mobileTab, setMobileTab] = useState<'feeds' | 'killfeed'>('feeds');
   const [railRefresh, setRailRefresh] = useState<number>(0);
   const [zonesByCam, setZonesByCam] = useState<Record<string, CameraZone[]>>({});
-  const [pausedCams, setPausedCams] = useState<string[]>([]);
+  const [schedules, setSchedules] = useState<Record<string, CameraScheduleConfig>>({});
   const detections = telemetry?.detections || {};
 
   useEffect(() => {
@@ -30,47 +31,43 @@ export default function App() {
       .then((data) => setZonesByCam(data))
       .catch((err) => console.error('Failed to load camera zones:', err));
 
-    fetch(`http://${HOST_IP}:8080/api/cameras/paused`)
-      .then((res) => (res.ok ? res.json() : { paused: [] }))
-      .then((data) => setPausedCams(data.paused || []))
-      .catch((err) => console.error('Failed to load paused cameras:', err));
+    const fetchSchedules = () => {
+      fetch(`http://${HOST_IP}:8080/api/cameras/schedules`)
+        .then((res) => (res.ok ? res.json() : {}))
+        .then((data) => setSchedules(data))
+        .catch((err) => console.error('Failed to load schedules:', err));
+    };
+    fetchSchedules();
+    const timer = window.setInterval(fetchSchedules, 15000);
+    return () => window.clearInterval(timer);
   }, []);
-
-  const togglePauseCam = async (streamName: string) => {
-    try {
-      const res = await fetch(`http://${HOST_IP}:8080/api/cameras/${streamName}/pause`, {
-        method: 'POST',
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setPausedCams(data.paused || []);
-      }
-    } catch (err) {
-      console.error('Failed to toggle camera pause:', err);
-    }
-  };
 
   const primaryCam = CAMERAS.find((c) => c.streamName === focusedStream);
   const secondaryCams = CAMERAS.filter((c) => c.streamName !== focusedStream);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col pb-12 lg:pb-0">
       <StatusHeader telemetry={telemetry} status={status} />
 
       <div className="flex-1 flex overflow-hidden">
-        <div className="flex-1 flex flex-col p-6 gap-4 overflow-y-auto">
+        {/* Main Camera Viewport (Always visible on desktop, or when 'feeds' tab active on mobile) */}
+        <div
+          className={`flex-1 flex flex-col p-3 sm:p-6 gap-4 overflow-y-auto ${
+            mobileTab === 'killfeed' ? 'hidden lg:flex' : 'flex'
+          }`}
+        >
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase tracking-wider text-zinc-400">
+            <span className="text-[11px] sm:text-xs font-mono uppercase tracking-wider text-zinc-400">
               {focusedStream && primaryCam
-                ? `// THEATER FOCUS: ${primaryCam.title} (${primaryCam.streamName})`
-                : '// TACTICAL MATRIX (YOLOv8s + RTX 3060 Ti VLM)'}
+                ? `// THEATER FOCUS: ${primaryCam.title}`
+                : '// TACTICAL MATRIX (DRIVEWAY · LOFT · LIVING_ROOM)'}
             </span>
 
             <div className="flex items-center gap-2">
               {focusedStream && (
                 <button
                   onClick={() => setFocusedStream(null)}
-                  className="bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 px-3 py-1 rounded text-xs font-mono text-zinc-200 flex items-center gap-1.5 cursor-pointer"
+                  className="bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded text-xs font-mono text-zinc-200 flex items-center gap-1.5 cursor-pointer"
                 >
                   <LayoutGrid className="w-3.5 h-3.5 text-emerald-400" />
                   3-CAM GRID
@@ -78,7 +75,7 @@ export default function App() {
               )}
               <button
                 onClick={() => setShowRail((prev) => !prev)}
-                className="bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 px-2.5 py-1 rounded text-xs font-mono text-zinc-300 flex items-center gap-1.5 cursor-pointer"
+                className="hidden lg:flex bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 px-2.5 py-1 rounded text-xs font-mono text-zinc-300 items-center gap-1.5 cursor-pointer"
               >
                 {showRail ? <PanelRightClose className="w-3.5 h-3.5 text-emerald-400" /> : <PanelRightOpen className="w-3.5 h-3.5 text-emerald-400" />}
                 {showRail ? 'HIDE KILL-FEED' : 'SHOW KILL-FEED'}
@@ -87,7 +84,7 @@ export default function App() {
           </div>
 
           {focusedStream && primaryCam ? (
-            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 sm:gap-6 items-start">
               <div className="lg:col-span-3">
                 <VideoTile
                   title={primaryCam.title}
@@ -96,13 +93,13 @@ export default function App() {
                   detections={detections[primaryCam.streamName] || []}
                   zones={zonesByCam[primaryCam.streamName] || []}
                   onZonesUpdated={setZonesByCam}
-                  isPaused={pausedCams.includes(primaryCam.streamName)}
-                  onTogglePause={() => togglePauseCam(primaryCam.streamName)}
+                  schedule={schedules[primaryCam.streamName]}
+                  onScheduleUpdated={setSchedules}
                   isFocused={true}
                   onToggleFocus={() => setFocusedStream(null)}
                 />
               </div>
-              <div className="lg:col-span-1 flex flex-col gap-6">
+              <div className="lg:col-span-1 flex flex-col gap-4 sm:gap-6">
                 {secondaryCams.map((cam) => (
                   <VideoTile
                     key={cam.streamName}
@@ -112,8 +109,8 @@ export default function App() {
                     detections={detections[cam.streamName] || []}
                     zones={zonesByCam[cam.streamName] || []}
                     onZonesUpdated={setZonesByCam}
-                    isPaused={pausedCams.includes(cam.streamName)}
-                    onTogglePause={() => togglePauseCam(cam.streamName)}
+                    schedule={schedules[cam.streamName]}
+                    onScheduleUpdated={setSchedules}
                     isFocused={false}
                     onToggleFocus={() => setFocusedStream(cam.streamName)}
                   />
@@ -121,7 +118,7 @@ export default function App() {
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 content-start">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6 content-start">
               {CAMERAS.map((cam) => (
                 <VideoTile
                   key={cam.streamName}
@@ -131,8 +128,8 @@ export default function App() {
                   detections={detections[cam.streamName] || []}
                   zones={zonesByCam[cam.streamName] || []}
                   onZonesUpdated={setZonesByCam}
-                  isPaused={pausedCams.includes(cam.streamName)}
-                  onTogglePause={() => togglePauseCam(cam.streamName)}
+                  schedule={schedules[cam.streamName]}
+                  onScheduleUpdated={setSchedules}
                   isFocused={false}
                   onToggleFocus={() => setFocusedStream(cam.streamName)}
                 />
@@ -141,14 +138,51 @@ export default function App() {
           )}
         </div>
 
-        {showRail && <EvidenceRail hostIp={HOST_IP} refreshTrigger={railRefresh} />}
+        {/* Desktop Side Rail */}
+        {showRail && (
+          <div className="hidden lg:block">
+            <EvidenceRail hostIp={HOST_IP} refreshTrigger={railRefresh} />
+          </div>
+        )}
+
+        {/* Mobile Full-Screen Kill-Feed Tab */}
+        {mobileTab === 'killfeed' && (
+          <div className="flex-1 lg:hidden overflow-y-auto">
+            <EvidenceRail hostIp={HOST_IP} refreshTrigger={railRefresh} fullWidthMobile={true} />
+          </div>
+        )}
       </div>
 
       <CommandPrompt
         hostIp={HOST_IP}
-        onFocusStream={setFocusedStream}
+        onFocusStream={(s) => {
+          setFocusedStream(s);
+          setMobileTab('feeds');
+        }}
         onRefreshRail={() => setRailRefresh((prev) => prev + 1)}
       />
+
+      {/* Mobile Bottom Navigation Bar */}
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-zinc-950 border-t border-zinc-800 flex items-center justify-around py-2 z-40 font-mono text-xs">
+        <button
+          onClick={() => setMobileTab('feeds')}
+          className={`flex items-center gap-1.5 px-4 py-1 rounded font-bold ${
+            mobileTab === 'feeds' ? 'bg-emerald-600 text-white' : 'text-zinc-400'
+          }`}
+        >
+          <Camera className="w-4 h-4" />
+          LIVE CAMERAS (3)
+        </button>
+        <button
+          onClick={() => setMobileTab('killfeed')}
+          className={`flex items-center gap-1.5 px-4 py-1 rounded font-bold ${
+            mobileTab === 'killfeed' ? 'bg-emerald-600 text-white' : 'text-zinc-400'
+          }`}
+        >
+          <Eye className="w-4 h-4" />
+          KILL-FEED LOG
+        </button>
+      </nav>
     </div>
   );
 }

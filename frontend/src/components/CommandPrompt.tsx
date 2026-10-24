@@ -10,8 +10,9 @@ interface CommandPromptProps {
 const QUICK_CHIPS = [
   { label: '📊 DB SUMMARY', prompt: 'Give me a telemetry log summary' },
   { label: '🔍 INSPECT LATEST', prompt: 'Inspect latest detection' },
-  { label: '🛡️ CHECK BREACHES', prompt: 'Report perimeter tripwire breaches' },
-  { label: '🎥 FOCUS EXT 1', prompt: 'Focus exterior 1' },
+  { label: '🎥 DRIVEWAY', prompt: 'Focus driveway' },
+  { label: '🎥 LOFT', prompt: 'Focus loft' },
+  { label: '🎥 LIVING ROOM', prompt: 'Focus living room' },
   { label: '🖥️ 3-CAM GRID', prompt: 'Restore grid view' },
 ];
 
@@ -52,9 +53,9 @@ export function CommandPrompt({ hostIp, onFocusStream, onRefreshRail }: CommandP
   };
 
   return (
-    <footer className="border-t border-zinc-800 bg-zinc-900/95 px-6 py-2.5 flex flex-col gap-2 z-20">
+    <footer className="border-t border-zinc-800 bg-zinc-900/95 px-3 sm:px-6 py-2.5 flex flex-col gap-2 z-20">
       {lastReply && (
-        <div className="bg-zinc-950 border border-emerald-500/40 rounded px-3 py-2 flex items-center justify-between gap-4 font-mono text-xs">
+        <div className="bg-zinc-950 border border-emerald-500/40 rounded px-3 py-2 flex flex-wrap items-center justify-between gap-2 font-mono text-xs">
           <div className="flex items-center gap-2 text-emerald-300">
             <Sparkles className="w-4 h-4 shrink-0 text-emerald-400" />
             <span>{lastReply.text}</span>
@@ -74,9 +75,9 @@ export function CommandPrompt({ hostIp, onFocusStream, onRefreshRail }: CommandP
         </div>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <form onSubmit={handleSubmit} className="flex-1 flex items-center gap-2 min-w-[280px]">
-          <div className="flex items-center gap-1.5 text-emerald-400 font-mono text-xs font-bold shrink-0">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <form onSubmit={handleSubmit} className="flex-1 flex items-center gap-2 min-w-[240px]">
+          <div className="hidden sm:flex items-center gap-1.5 text-emerald-400 font-mono text-xs font-bold shrink-0">
             <Terminal className="w-4 h-4" />
             <span>COMMAND &gt;</span>
           </div>
@@ -84,7 +85,7 @@ export function CommandPrompt({ hostIp, onFocusStream, onRefreshRail }: CommandP
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask Command Agent or issue tactical directive (e.g., 'Inspect latest', 'Focus exterior 1', 'How many vehicles?')..."
+            placeholder="Command directive (e.g., 'Focus driveway', 'Inspect latest')..."
             className="flex-1 bg-zinc-950 border border-zinc-800 focus:border-emerald-500/60 rounded px-3 py-1.5 text-xs font-mono text-zinc-100 outline-none"
           />
           <button
@@ -93,16 +94,16 @@ export function CommandPrompt({ hostIp, onFocusStream, onRefreshRail }: CommandP
             className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-1.5 rounded text-xs font-mono font-bold text-white flex items-center gap-1.5 cursor-pointer"
           >
             <Send className="w-3.5 h-3.5" />
-            {loading ? 'EXEC...' : 'SEND'}
+            {loading ? '...' : 'SEND'}
           </button>
         </form>
 
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center gap-1.5 overflow-x-auto max-w-full pb-0.5">
           {QUICK_CHIPS.map((chip) => (
             <button
               key={chip.label}
               onClick={() => runPrompt(chip.prompt)}
-              className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 px-2 py-1 rounded text-[10px] font-mono text-zinc-300 cursor-pointer transition-colors"
+              className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 px-2 py-1 rounded text-[10px] font-mono text-zinc-300 whitespace-nowrap cursor-pointer transition-colors"
             >
               {chip.label}
             </button>

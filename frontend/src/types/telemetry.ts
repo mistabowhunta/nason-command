@@ -25,6 +25,15 @@ export interface CameraZone {
   points: ZonePoint[];
 }
 
+export interface CameraScheduleConfig {
+  camera_id: string;
+  mode: 'always_record' | 'paused' | 'schedule';
+  start_time: string;
+  end_time: string;
+  currently_recording: boolean;
+  server_time?: string;
+}
+
 export interface PersistedDetectionEvent {
   id: number;
   timestamp: string;
@@ -33,6 +42,10 @@ export interface PersistedDetectionEvent {
   sub_type: string;
   full_label: string;
   confidence: number;
+  bbox_x: number;
+  bbox_y: number;
+  bbox_w: number;
+  bbox_h: number;
   crop_url: string | null;
   full_url: string | null;
   ai_notes?: string | null;

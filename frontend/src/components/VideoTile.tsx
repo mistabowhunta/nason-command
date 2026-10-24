@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useWhepClient } from '../hooks/useWhepClient';
-import type { BoundingBoxDetection, CameraZone, ZonePoint } from '../types/telemetry';
-import { Check, Crosshair, Database, Maximize2, Minimize2, PauseCircle, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
+import type { BoundingBoxDetection, CameraScheduleConfig, CameraZone, ZonePoint } from '../types/telemetry';
+import { Check, Clock, Crosshair, Database, Eye, EyeOff, Maximize2, Minimize2, PauseCircle, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
 
 interface VideoTileProps {
   title: string;
@@ -10,8 +10,8 @@ interface VideoTileProps {
   detections?: BoundingBoxDetection[];
   zones?: CameraZone[];
   onZonesUpdated?: (zonesByCam: Record<string, CameraZone[]>) => void;
-  isPaused?: boolean;
-  onTogglePause?: () => void;
+  schedule?: CameraScheduleConfig;
+  onScheduleUpdated?: (schedules: Record<string, CameraScheduleConfig>) => void;
   isFocused?: boolean;
   onToggleFocus?: () => void;
 }
@@ -58,8 +58,8 @@ export function VideoTile({
   detections = [],
   zones = [],
   onZonesUpdated,
-  isPaused = false,
-  onTogglePause,
+  schedule,
+  onScheduleUpdated,
   isFocused = false,
   onToggleFocus,
 }: VideoTileProps) {
@@ -71,6 +71,7 @@ export function VideoTile({
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [autoLock, setAutoLock] = useState<boolean>(false);
+  const [showBbox, setShowBbox] = useState<boolean>(true);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
@@ -78,7 +79,22 @@ export function VideoTile({
   const [draftPoints, setDraftPoints] = useState<ZonePoint[]>([]);
   const canvasWrapRef = useRef<HTMLDivElement | null>(null);
 
+  // Schedule Modal State
+  const [showSchedModal, setShowSchedModal] = useState<boolean>(false);
+  const [schedMode, setSchedMode] = useState<'always_record' | 'paused' | 'schedule'>('always_record');
+  const [schedStart, setSchedStart] = useState<string>('21:00');
+  const [schedEnd, setSchedEnd] = useState<string>('06:00');
+
+  useEffect(() => {
+    if (schedule) {
+      setSchedMode(schedule.mode);
+      setSchedStart(schedule.start_time || '21:00');
+      setSchedEnd(schedule.end_time || '06:00');
+    }
+  }, [schedule]);
+
   const hasBreach = detections.some((d) => d.breach);
+  const isRecordingNow = schedule ? schedule.currently_recording : true;
 
   useEffect(() => {
     const now = Date.now();
@@ -126,6 +142,28 @@ export function VideoTile({
       }
     }
   }, [detections, autoLock, drawMode]);
+
+  const saveSchedule = async (modeOverride?: 'always_record' | 'paused' | 'schedule') => {
+    const targetMode = modeOverride || schedMode;
+    try {
+      const res = await fetch(`${apiBase}/api/cameras/${streamName}/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: targetMode,
+          start_time: schedStart,
+          end_time: schedEnd,
+        }),
+      });
+      if (res.ok && onScheduleUpdated) {
+        const updated = await res.json();
+        onScheduleUpdated(updated);
+      }
+      setShowSchedModal(false);
+    } catch (err) {
+      console.error('Failed to save camera schedule:', err);
+    }
+  };
 
   const startDrawing = (type: 'exclusion' | 'tripwire') => {
     setAutoLock(false);
@@ -320,103 +358,106 @@ export function VideoTile({
             </g>
           )}
 
-          {Object.entries(trails).map(([slot, trail]) => {
-            if (trail.points.length < 2) return null;
-            const theme = CATEGORY_THEME[trail.category] || CATEGORY_THEME.vehicle;
-            const pointsAttr = trail.points.map((p) => `${p.x},${p.y}`).join(' ');
-            return (
-              <g key={slot}>
-                <polyline
-                  fill="none"
-                  stroke={theme.stroke}
-                  strokeWidth="2.5"
-                  strokeDasharray="6 4"
-                  strokeOpacity="0.75"
-                  points={pointsAttr}
-                />
-                {trail.points.map((pt, idx) => (
-                  <circle
-                    key={idx}
-                    cx={pt.x}
-                    cy={pt.y}
-                    r={idx === trail.points.length - 1 ? 4.5 : 2.2}
-                    fill={theme.stroke}
-                    fillOpacity={(idx + 1) / trail.points.length}
+          {showBbox &&
+            Object.entries(trails).map(([slot, trail]) => {
+              if (trail.points.length < 2) return null;
+              const theme = CATEGORY_THEME[trail.category] || CATEGORY_THEME.vehicle;
+              const pointsAttr = trail.points.map((p) => `${p.x},${p.y}`).join(' ');
+              return (
+                <g key={slot}>
+                  <polyline
+                    fill="none"
+                    stroke={theme.stroke}
+                    strokeWidth="2.5"
+                    strokeDasharray="6 4"
+                    strokeOpacity="0.75"
+                    points={pointsAttr}
                   />
-                ))}
-              </g>
-            );
-          })}
+                  {trail.points.map((pt, idx) => (
+                    <circle
+                      key={idx}
+                      cx={pt.x}
+                      cy={pt.y}
+                      r={idx === trail.points.length - 1 ? 4.5 : 2.2}
+                      fill={theme.stroke}
+                      fillOpacity={(idx + 1) / trail.points.length}
+                    />
+                  ))}
+                </g>
+              );
+            })}
         </svg>
 
-        <div className="absolute inset-0 pointer-events-none overflow-hidden">
-          {detections.map((det) => {
-            const theme = CATEGORY_THEME[det.category] || CATEGORY_THEME.vehicle;
-            const shortSlot = det.slot.replace('Motion_', 'M');
-            const pctConf = Math.round(det.confidence * 100);
+        {showBbox && (
+          <div className="absolute inset-0 pointer-events-none overflow-hidden">
+            {detections.map((det) => {
+              const theme = CATEGORY_THEME[det.category] || CATEGORY_THEME.vehicle;
+              const shortSlot = det.slot.replace('Motion_', 'M');
+              const pctConf = Math.round(det.confidence * 100);
 
-            return (
-              <div
-                key={det.slot}
-                className={`absolute border transition-all duration-150 ease-out ${
-                  det.breach ? 'bg-red-600/25 border-red-500 animate-pulse' : theme.fill
-                }`}
-                style={{
-                  left: `${det.x * 100}%`,
-                  top: `${det.y * 100}%`,
-                  width: `${det.w * 100}%`,
-                  height: `${det.h * 100}%`,
-                }}
-              >
-                <div className={`absolute -top-0.5 -left-0.5 w-3 h-3 border-t-2 border-l-2 ${theme.bracket}`} />
-                <div className={`absolute -top-0.5 -right-0.5 w-3 h-3 border-t-2 border-r-2 ${theme.bracket}`} />
-                <div className={`absolute -bottom-0.5 -left-0.5 w-3 h-3 border-b-2 border-l-2 ${theme.bracket}`} />
-                <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 border-b-2 border-r-2 ${theme.bracket}`} />
-
-                <div className="absolute inset-0 flex items-center justify-center opacity-60">
-                  <div className={`w-1.5 h-1.5 rounded-full ${theme.bracket} border`} />
-                </div>
-
-                <span
-                  className={`absolute -top-5 left-0 px-1.5 py-0.5 text-[10px] font-mono font-bold tracking-tight rounded-xs whitespace-nowrap border ${
-                    det.breach ? 'bg-red-600 text-white border-red-300' : theme.badge
+              return (
+                <div
+                  key={det.slot}
+                  className={`absolute border transition-all duration-150 ease-out ${
+                    det.breach ? 'bg-red-600/25 border-red-500 animate-pulse' : theme.fill
                   }`}
+                  style={{
+                    left: `${det.x * 100}%`,
+                    top: `${det.y * 100}%`,
+                    width: `${det.w * 100}%`,
+                    height: `${det.h * 100}%`,
+                  }}
                 >
-                  {shortSlot} // {det.category.toUpperCase()} {det.breach ? '⚠️ BREACH' : `· ${pctConf}%`}
-                </span>
-              </div>
-            );
-          })}
-        </div>
+                  <div className={`absolute -top-0.5 -left-0.5 w-3 h-3 border-t-2 border-l-2 ${theme.bracket}`} />
+                  <div className={`absolute -top-0.5 -right-0.5 w-3 h-3 border-t-2 border-r-2 ${theme.bracket}`} />
+                  <div className={`absolute -bottom-0.5 -left-0.5 w-3 h-3 border-b-2 border-l-2 ${theme.bracket}`} />
+                  <div className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 border-b-2 border-r-2 ${theme.bracket}`} />
+
+                  <div className="absolute inset-0 flex items-center justify-center opacity-60">
+                    <div className={`w-1.5 h-1.5 rounded-full ${theme.bracket} border`} />
+                  </div>
+
+                  <span
+                    className={`absolute -top-5 left-0 px-1.5 py-0.5 text-[10px] font-mono font-bold tracking-tight rounded-xs whitespace-nowrap border ${
+                      det.breach ? 'bg-red-600 text-white border-red-300' : theme.badge
+                    }`}
+                  >
+                    {shortSlot} // {det.category.toUpperCase()} {det.breach ? '⚠️ BREACH' : `· ${pctConf}%`}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Stationary Top HUD Control Bar */}
       <div
-        className="absolute top-2 left-2 right-2 flex justify-between items-center z-10"
+        className="absolute top-2 left-2 right-2 flex flex-wrap justify-between items-center gap-1 z-10"
         onClick={(e) => e.stopPropagation()}
         onDoubleClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-1.5 pointer-events-none">
-          <span className="bg-zinc-950/85 border border-zinc-800 px-2.5 py-1 rounded text-xs font-mono text-zinc-200">
-            {title} <span className="text-zinc-500">({streamName})</span>
+          <span className="bg-zinc-950/85 border border-zinc-800 px-2 py-0.5 sm:px-2.5 sm:py-1 rounded text-[11px] sm:text-xs font-mono font-bold text-zinc-100">
+            {title}
           </span>
           {hasBreach && (
             <span className="bg-red-600 text-white px-2 py-0.5 rounded text-[10px] font-mono font-bold animate-bounce">
-              ⚠️ BREACH
+              🚨 BREACH
             </span>
           )}
           {zoom > 1 && (
-            <span className="bg-sky-950/90 border border-sky-500/40 px-2 py-0.5 rounded text-[10px] font-mono font-bold text-sky-300">
-              PTZ {zoom.toFixed(1)}x
+            <span className="bg-sky-950/90 border border-sky-500/40 px-1.5 py-0.5 rounded text-[10px] font-mono font-bold text-sky-300">
+              {zoom.toFixed(1)}x
             </span>
           )}
         </div>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 flex-wrap justify-end">
           {drawMode ? (
             <>
               <span className="bg-amber-950/90 border border-amber-500/50 px-2 py-1 rounded text-[10px] font-mono text-amber-300">
-                CLICK {Math.max(0, 3 - draftPoints.length)}+ PTS ({draftPoints.length})
+                {Math.max(0, 3 - draftPoints.length)}+ PTS ({draftPoints.length})
               </span>
               <button
                 onClick={saveZone}
@@ -435,27 +476,55 @@ export function VideoTile({
             </>
           ) : (
             <>
-              {onTogglePause && (
-                <button
-                  onClick={onTogglePause}
-                  title={isPaused ? 'Persistence Paused (Click to Resume DB/Snapshot Logging)' : 'Logging Active (Click to Pause DB/Snapshot Logging for this camera)'}
-                  className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer transition-colors ${
-                    isPaused
-                      ? 'bg-amber-950/90 text-amber-300 border-amber-500/60'
-                      : 'bg-zinc-950/85 hover:bg-zinc-800 text-emerald-400 border-zinc-800'
-                  }`}
-                >
-                  {isPaused ? <PauseCircle className="w-3 h-3" /> : <Database className="w-3 h-3" />}
-                  {isPaused ? 'PAUSED' : 'REC'}
-                </button>
-              )}
+              <button
+                onClick={() => setShowSchedModal((prev) => !prev)}
+                title="Configure Recording / Pause Schedule"
+                className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer transition-colors ${
+                  !isRecordingNow
+                    ? 'bg-amber-950/90 text-amber-300 border-amber-500/60'
+                    : schedule?.mode === 'schedule'
+                    ? 'bg-sky-950/90 text-sky-300 border-sky-500/50'
+                    : 'bg-zinc-950/85 hover:bg-zinc-800 text-emerald-400 border-zinc-800'
+                }`}
+              >
+                {schedule?.mode === 'schedule' ? (
+                  <Clock className="w-3 h-3" />
+                ) : isRecordingNow ? (
+                  <Database className="w-3 h-3" />
+                ) : (
+                  <PauseCircle className="w-3 h-3" />
+                )}
+                <span>
+                  {schedule?.mode === 'schedule'
+                    ? isRecordingNow
+                      ? 'SCHED·REC'
+                      : 'SCHED·PAUSED'
+                    : isRecordingNow
+                    ? 'REC'
+                    : 'PAUSED'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setShowBbox((prev) => !prev)}
+                title="Toggle Target Bounding Boxes"
+                className={`px-1.5 py-1 rounded text-[10px] font-mono border flex items-center gap-1 cursor-pointer ${
+                  showBbox
+                    ? 'bg-zinc-950/85 text-emerald-300 border-zinc-800'
+                    : 'bg-zinc-900 text-zinc-500 border-zinc-800'
+                }`}
+              >
+                {showBbox ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                <span className="hidden sm:inline">BBOX</span>
+              </button>
+
               <button
                 onClick={() => startDrawing('exclusion')}
                 title="Draw Red Exclusion Mask"
                 className="bg-zinc-950/85 hover:bg-red-950/80 border border-zinc-800 hover:border-red-500/50 px-1.5 py-1 rounded text-[10px] font-mono text-red-300 flex items-center gap-1 cursor-pointer"
               >
                 <ShieldOff className="w-3 h-3" />
-                +EXCL
+                <span className="hidden sm:inline">+EXCL</span>
               </button>
               <button
                 onClick={() => startDrawing('tripwire')}
@@ -463,7 +532,7 @@ export function VideoTile({
                 className="bg-zinc-950/85 hover:bg-amber-950/80 border border-zinc-800 hover:border-amber-500/50 px-1.5 py-1 rounded text-[10px] font-mono text-amber-300 flex items-center gap-1 cursor-pointer"
               >
                 <ShieldAlert className="w-3 h-3" />
-                +TRIP
+                <span className="hidden sm:inline">+TRIP</span>
               </button>
               {zones.length > 0 && (
                 <button
@@ -478,7 +547,7 @@ export function VideoTile({
                 <button
                   onClick={resetPtz}
                   title="Reset Digital Zoom (1.0x)"
-                  className="bg-zinc-950/85 hover:bg-zinc-800 border border-zinc-700 px-2 py-1 rounded text-[10px] font-mono text-zinc-300 flex items-center gap-1 cursor-pointer"
+                  className="bg-zinc-950/85 hover:bg-zinc-800 border border-zinc-700 px-1.5 py-1 rounded text-[10px] font-mono text-zinc-300 flex items-center gap-1 cursor-pointer"
                 >
                   <RotateCcw className="w-3 h-3" />
                   1x
@@ -487,14 +556,14 @@ export function VideoTile({
               <button
                 onClick={() => setAutoLock((prev) => !prev)}
                 title="Auto-Zoom & Track Primary Target"
-                className={`px-2 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer transition-colors ${
+                className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer transition-colors ${
                   autoLock
                     ? 'bg-amber-500/25 text-amber-300 border-amber-500/60'
                     : 'bg-zinc-950/85 hover:bg-zinc-800 text-zinc-400 border-zinc-800'
                 }`}
               >
                 <Crosshair className="w-3 h-3" />
-                {autoLock ? 'LOCKED' : 'LOCK'}
+                <span className="hidden sm:inline">{autoLock ? 'LOCKED' : 'LOCK'}</span>
               </button>
               {onToggleFocus && (
                 <button
@@ -509,7 +578,7 @@ export function VideoTile({
           )}
 
           <span
-            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold pointer-events-none ${
+            className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold pointer-events-none ${
               streamState === 'LIVE'
                 ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
                 : streamState === 'CONNECTING'
@@ -521,6 +590,84 @@ export function VideoTile({
           </span>
         </div>
       </div>
+
+      {/* Per-Camera Recording Schedule Popover */}
+      {showSchedModal && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="absolute top-11 right-2 z-30 bg-zinc-950/95 border border-zinc-700 rounded-lg p-3 w-64 shadow-2xl font-mono text-xs space-y-2.5"
+        >
+          <div className="flex items-center justify-between border-b border-zinc-800 pb-1.5">
+            <span className="font-bold text-emerald-400">{title} // SCHEDULE</span>
+            <button onClick={() => setShowSchedModal(false)} className="text-zinc-400 hover:text-white cursor-pointer">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1">
+            <button
+              onClick={() => saveSchedule('always_record')}
+              className={`py-1.5 rounded text-[10px] font-bold border cursor-pointer ${
+                schedMode === 'always_record'
+                  ? 'bg-emerald-600 text-white border-emerald-400'
+                  : 'bg-zinc-900 text-zinc-300 border-zinc-800'
+              }`}
+            >
+              24/7 REC
+            </button>
+            <button
+              onClick={() => saveSchedule('paused')}
+              className={`py-1.5 rounded text-[10px] font-bold border cursor-pointer ${
+                schedMode === 'paused'
+                  ? 'bg-amber-600 text-white border-amber-400'
+                  : 'bg-zinc-900 text-zinc-300 border-zinc-800'
+              }`}
+            >
+              PAUSE NOW
+            </button>
+            <button
+              onClick={() => setSchedMode('schedule')}
+              className={`py-1.5 rounded text-[10px] font-bold border cursor-pointer ${
+                schedMode === 'schedule'
+                  ? 'bg-sky-600 text-white border-sky-400'
+                  : 'bg-zinc-900 text-zinc-300 border-zinc-800'
+              }`}
+            >
+              SCHEDULE
+            </button>
+          </div>
+
+          {schedMode === 'schedule' && (
+            <div className="space-y-2 pt-1 border-t border-zinc-800">
+              <div className="text-[10px] text-zinc-400">Active Recording Window (PT):</div>
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-[10px] text-zinc-400">START:</label>
+                <input
+                  type="time"
+                  value={schedStart}
+                  onChange={(e) => setSchedStart(e.target.value)}
+                  className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-[10px] text-zinc-400">STOP:</label>
+                <input
+                  type="time"
+                  value={schedEnd}
+                  onChange={(e) => setSchedEnd(e.target.value)}
+                  className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100"
+                />
+              </div>
+              <button
+                onClick={() => saveSchedule('schedule')}
+                className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-1.5 rounded text-[11px] cursor-pointer"
+              >
+                SAVE WINDOW
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

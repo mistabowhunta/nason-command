@@ -1,11 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import type { PersistedDetectionEvent } from '../types/telemetry';
-import { Camera, Clock, Cpu, Eye, Sparkles, Trash2, X } from 'lucide-react';
+import { Camera, Clock, Cpu, Crosshair, Eye, Sparkles, Trash2, X } from 'lucide-react';
 
 interface EvidenceRailProps {
   hostIp: string;
   refreshTrigger?: number;
+  fullWidthMobile?: boolean;
 }
+
+const CAM_NAMES: Record<string, string> = {
+  annke_1: 'DRIVEWAY',
+  tapo_1: 'LOFT',
+  tapo_2: 'LIVING_ROOM',
+};
 
 const BADGE_COLORS: Record<string, string> = {
   person: 'bg-red-950 text-red-300 border-red-500/50',
@@ -13,15 +20,16 @@ const BADGE_COLORS: Record<string, string> = {
   animal: 'bg-amber-950 text-amber-300 border-amber-400/50',
 };
 
-export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) {
+export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = false }: EvidenceRailProps) {
   const [events, setEvents] = useState<PersistedDetectionEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<PersistedDetectionEvent | null>(null);
+  const [showSnapshotBbox, setShowSnapshotBbox] = useState<boolean>(true);
   const [inspectingId, setInspectingId] = useState<number | null>(null);
   const apiBase = `http://${hostIp}:8080`;
 
   const fetchEvents = async () => {
     try {
-      const res = await fetch(`${apiBase}/api/detections?limit=25`);
+      const res = await fetch(`${apiBase}/api/detections?limit=35`);
       if (res.ok) {
         const data: PersistedDetectionEvent[] = await res.json();
         setEvents(data);
@@ -79,7 +87,11 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
 
   return (
     <>
-      <aside className="w-80 border-l border-zinc-800 bg-zinc-900/60 flex flex-col h-[calc(100vh-105px)] sticky top-[53px]">
+      <aside
+        className={`${
+          fullWidthMobile ? 'w-full' : 'w-80 border-l border-zinc-800 h-[calc(100vh-105px)] sticky top-[53px]'
+        } bg-zinc-900/60 flex flex-col`}
+      >
         <div className="px-3 py-3 border-b border-zinc-800 flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <Eye className="w-4 h-4 text-emerald-400" />
@@ -108,6 +120,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
             events.map((ev) => {
               const badge = BADGE_COLORS[ev.category] || BADGE_COLORS.vehicle;
               const isBreach = ev.full_label.includes('BREACH');
+              const friendlyCam = CAM_NAMES[ev.camera_id] || ev.camera_id.toUpperCase();
               const timeStr = new Date(ev.timestamp).toLocaleTimeString([], {
                 hour12: false,
                 hour: '2-digit',
@@ -119,10 +132,19 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
                 <div
                   key={ev.id}
                   onClick={() => setSelectedEvent(ev)}
-                  className={`group bg-zinc-950/90 hover:bg-zinc-900 border rounded p-2 flex flex-col gap-2 cursor-pointer transition-all ${
-                    isBreach ? 'border-red-500/70' : 'border-zinc-800 hover:border-zinc-600'
+                  className={`group rounded p-2 flex flex-col gap-2 cursor-pointer transition-all border ${
+                    isBreach
+                      ? 'bg-red-950/35 hover:bg-red-950/50 border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.25)]'
+                      : 'bg-zinc-950/90 hover:bg-zinc-900 border-zinc-800 hover:border-zinc-600'
                   }`}
                 >
+                  {isBreach && (
+                    <div className="bg-red-600 text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded flex items-center justify-between">
+                      <span>🚨 TRIPWIRE PERIMETER BREACH</span>
+                      <span>{friendlyCam}</span>
+                    </div>
+                  )}
+
                   <div className="flex gap-3 items-center">
                     <div className="w-16 h-14 bg-zinc-900 rounded overflow-hidden shrink-0 border border-zinc-800 flex items-center justify-center">
                       {ev.crop_url ? (
@@ -150,8 +172,8 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
                         {ev.full_label}
                       </div>
                       <div className="flex items-center justify-between mt-1">
-                        <span className="text-[10px] text-zinc-500 uppercase">
-                          CAM: {ev.camera_id}
+                        <span className="text-[10px] text-zinc-400 uppercase font-bold">
+                          {friendlyCam}
                         </span>
                         <button
                           onClick={(e) => handleDeepInspect(e, ev.id)}
@@ -166,7 +188,13 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
                   </div>
 
                   {ev.ai_notes && (
-                    <div className="bg-emerald-950/30 border border-emerald-500/30 rounded px-2 py-1.5 text-[10px] font-mono text-emerald-200 leading-relaxed">
+                    <div
+                      className={`rounded px-2 py-1.5 text-[10px] font-mono leading-relaxed border ${
+                        isBreach
+                          ? 'bg-red-950/60 border-red-500/40 text-red-200'
+                          : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200'
+                      }`}
+                    >
                       {ev.ai_notes}
                     </div>
                   )}
@@ -180,32 +208,43 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
       {selectedEvent && (
         <div
           onClick={() => setSelectedEvent(null)}
-          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-6"
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-2 sm:p-6"
         >
           <div
             onClick={(e) => e.stopPropagation()}
             className="bg-zinc-950 border border-zinc-700 rounded-lg max-w-4xl w-full overflow-hidden shadow-2xl"
           >
-            <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between font-mono">
-              <div className="flex items-center gap-3">
+            <div className="px-3 sm:px-4 py-3 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-2 font-mono">
+              <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
                 <span className="text-xs font-bold text-emerald-400 uppercase">
-                  EVIDENCE SNAPSHOT #{selectedEvent.id}
+                  SNAPSHOT #{selectedEvent.id}
                 </span>
-                <span className="text-xs text-zinc-300">
-                  {selectedEvent.full_label} ({selectedEvent.camera_id})
+                <span className="text-xs text-zinc-200 font-bold">
+                  {CAM_NAMES[selectedEvent.camera_id] || selectedEvent.camera_id} // {selectedEvent.full_label}
                 </span>
-                <span className="text-xs text-zinc-500">
+                <span className="text-[11px] text-zinc-500">
                   {new Date(selectedEvent.timestamp).toLocaleString()}
                 </span>
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowSnapshotBbox((prev) => !prev)}
+                  className={`px-2.5 py-1 rounded text-xs font-mono font-bold border flex items-center gap-1.5 cursor-pointer ${
+                    showSnapshotBbox
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                      : 'bg-zinc-900 text-zinc-400 border-zinc-700'
+                  }`}
+                >
+                  <Crosshair className="w-3.5 h-3.5" />
+                  {showSnapshotBbox ? 'BBOX: ON' : 'BBOX: OFF'}
+                </button>
                 <button
                   onClick={(e) => handleDeepInspect(e, selectedEvent.id)}
                   disabled={inspectingId === selectedEvent.id}
                   className="px-2.5 py-1 rounded text-xs font-mono font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 cursor-pointer"
                 >
                   <Cpu className="w-3.5 h-3.5" />
-                  {inspectingId === selectedEvent.id ? 'RUNNING DEEP INSPECT...' : 'DEEP INSPECT TARGET'}
+                  {inspectingId === selectedEvent.id ? 'SCANNING...' : 'INSPECT'}
                 </button>
                 <button
                   onClick={() => setSelectedEvent(null)}
@@ -222,16 +261,33 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0 }: EvidenceRailProps) 
               </div>
             )}
 
-            <div className="bg-black aspect-video flex items-center justify-center">
+            <div className="bg-black aspect-video relative flex items-center justify-center overflow-hidden">
               {selectedEvent.full_url ? (
-                <img
-                  src={`${apiBase}${selectedEvent.full_url}`}
-                  alt="Full frame capture"
-                  className="w-full h-full object-contain"
-                />
+                <>
+                  <img
+                    src={`${apiBase}${selectedEvent.full_url}`}
+                    alt="Full frame capture"
+                    className="w-full h-full object-contain"
+                  />
+                  {showSnapshotBbox && selectedEvent.bbox_w > 0 && (
+                    <div
+                      className="absolute border-2 border-red-500 bg-red-500/15 pointer-events-none"
+                      style={{
+                        left: `${selectedEvent.bbox_x * 100}%`,
+                        top: `${selectedEvent.bbox_y * 100}%`,
+                        width: `${selectedEvent.bbox_w * 100}%`,
+                        height: `${selectedEvent.bbox_h * 100}%`,
+                      }}
+                    >
+                      <span className="absolute -top-5 left-0 bg-red-600 text-white text-[10px] font-mono font-bold px-1.5 py-0.5 rounded-xs whitespace-nowrap">
+                        {selectedEvent.full_label} · {Math.round(selectedEvent.confidence * 100)}%
+                      </span>
+                    </div>
+                  )}
+                </>
               ) : (
                 <span className="text-xs font-mono text-zinc-500">
-                  No snapshot image stored for this legacy event
+                  No snapshot image stored for this event
                 </span>
               )}
             </div>

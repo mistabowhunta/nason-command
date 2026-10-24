@@ -36,3 +36,12 @@ class CameraZone(Base):
     name: Mapped[str] = mapped_column(String(64))
     zone_type: Mapped[str] = mapped_column(String(32))
     points_json: Mapped[str] = mapped_column(Text)
+
+
+class CameraSchedule(Base):
+    __tablename__ = "camera_schedules"
+
+    camera_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    mode: Mapped[str] = mapped_column(String(24), default="always_record")  # 'always_record' | 'paused' | 'schedule'
+    start_time: Mapped[str] = mapped_column(String(10), default="21:00")    # HH:MM (America/Los_Angeles)
+    end_time: Mapped[str] = mapped_column(String(10), default="06:00")      # HH:MM (America/Los_Angeles)
