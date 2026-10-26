@@ -3,9 +3,10 @@ import { useTelemetryWs } from './hooks/useTelemetryWs';
 import { StatusHeader } from './components/StatusHeader';
 import { VideoTile } from './components/VideoTile';
 import { EvidenceRail } from './components/EvidenceRail';
+import { FaceGallery } from './components/FaceGallery';
 import { CommandPrompt } from './components/CommandPrompt';
 import type { CameraScheduleConfig, CameraZone } from './types/telemetry';
-import { Camera, Eye, LayoutGrid, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Camera, Eye, LayoutGrid, PanelRightClose, PanelRightOpen, Users } from 'lucide-react';
 
 const HOST_IP = window.location.hostname || '192.168.1.27';
 
@@ -18,8 +19,9 @@ const CAMERAS = [
 export default function App() {
   const { telemetry, status } = useTelemetryWs(`ws://${HOST_IP}:8080/ws/telemetry`);
   const [focusedStream, setFocusedStream] = useState<string | null>(null);
+  const [desktopView, setDesktopView] = useState<'matrix' | 'faces'>('matrix');
   const [showRail, setShowRail] = useState<boolean>(true);
-  const [mobileTab, setMobileTab] = useState<'feeds' | 'killfeed'>('feeds');
+  const [mobileTab, setMobileTab] = useState<'feeds' | 'killfeed' | 'faces'>('feeds');
   const [railRefresh, setRailRefresh] = useState<number>(0);
   const [zonesByCam, setZonesByCam] = useState<Record<string, CameraZone[]>>({});
   const [schedules, setSchedules] = useState<Record<string, CameraScheduleConfig>>({});
@@ -50,21 +52,47 @@ export default function App() {
       <StatusHeader telemetry={telemetry} status={status} />
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Main Camera Viewport (Always visible on desktop, or when 'feeds' tab active on mobile) */}
+        {/* Main Viewport */}
         <div
           className={`flex-1 flex flex-col p-3 sm:p-6 gap-4 overflow-y-auto ${
             mobileTab === 'killfeed' ? 'hidden lg:flex' : 'flex'
           }`}
         >
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] sm:text-xs font-mono uppercase tracking-wider text-zinc-400">
-              {focusedStream && primaryCam
-                ? `// THEATER FOCUS: ${primaryCam.title}`
-                : '// TACTICAL MATRIX (DRIVEWAY · LOFT · LIVING_ROOM)'}
-            </span>
+          {/* Top Navigation / Mode Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setDesktopView('matrix');
+                  setMobileTab('feeds');
+                }}
+                className={`px-3 py-1 rounded text-xs font-mono font-bold border flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  desktopView === 'matrix' && mobileTab !== 'faces'
+                    ? 'bg-emerald-600 text-white border-emerald-400'
+                    : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-800'
+                }`}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                TACTICAL MATRIX
+              </button>
+              <button
+                onClick={() => {
+                  setDesktopView('faces');
+                  setMobileTab('faces');
+                }}
+                className={`px-3 py-1 rounded text-xs font-mono font-bold border flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  desktopView === 'faces' || mobileTab === 'faces'
+                    ? 'bg-emerald-600 text-white border-emerald-400'
+                    : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-800'
+                }`}
+              >
+                <Users className="w-3.5 h-3.5" />
+                FACE GALLERY & WATCHLIST
+              </button>
+            </div>
 
             <div className="flex items-center gap-2">
-              {focusedStream && (
+              {focusedStream && desktopView === 'matrix' && (
                 <button
                   onClick={() => setFocusedStream(null)}
                   className="bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 px-2.5 py-1 rounded text-xs font-mono text-zinc-200 flex items-center gap-1.5 cursor-pointer"
@@ -83,7 +111,9 @@ export default function App() {
             </div>
           </div>
 
-          {focusedStream && primaryCam ? (
+          {desktopView === 'faces' || mobileTab === 'faces' ? (
+            <FaceGallery hostIp={HOST_IP} />
+          ) : focusedStream && primaryCam ? (
             <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 sm:gap-6 items-start">
               <div className="lg:col-span-3">
                 <VideoTile
@@ -157,30 +187,46 @@ export default function App() {
         hostIp={HOST_IP}
         onFocusStream={(s) => {
           setFocusedStream(s);
+          setDesktopView('matrix');
           setMobileTab('feeds');
         }}
         onRefreshRail={() => setRailRefresh((prev) => prev + 1)}
       />
 
-      {/* Mobile Bottom Navigation Bar */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-zinc-950 border-t border-zinc-800 flex items-center justify-around py-2 z-40 font-mono text-xs">
+      {/* Mobile 3-Tab Bottom Navigation Bar */}
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-zinc-950 border-t border-zinc-800 flex items-center justify-around py-2 z-40 font-mono text-[11px]">
         <button
-          onClick={() => setMobileTab('feeds')}
-          className={`flex items-center gap-1.5 px-4 py-1 rounded font-bold ${
+          onClick={() => {
+            setMobileTab('feeds');
+            setDesktopView('matrix');
+          }}
+          className={`flex items-center gap-1 px-3 py-1 rounded font-bold ${
             mobileTab === 'feeds' ? 'bg-emerald-600 text-white' : 'text-zinc-400'
           }`}
         >
-          <Camera className="w-4 h-4" />
-          LIVE CAMERAS (3)
+          <Camera className="w-3.5 h-3.5" />
+          CAMERAS
         </button>
         <button
           onClick={() => setMobileTab('killfeed')}
-          className={`flex items-center gap-1.5 px-4 py-1 rounded font-bold ${
+          className={`flex items-center gap-1 px-3 py-1 rounded font-bold ${
             mobileTab === 'killfeed' ? 'bg-emerald-600 text-white' : 'text-zinc-400'
           }`}
         >
-          <Eye className="w-4 h-4" />
-          KILL-FEED LOG
+          <Eye className="w-3.5 h-3.5" />
+          KILL-FEED
+        </button>
+        <button
+          onClick={() => {
+            setMobileTab('faces');
+            setDesktopView('faces');
+          }}
+          className={`flex items-center gap-1 px-3 py-1 rounded font-bold ${
+            mobileTab === 'faces' ? 'bg-emerald-600 text-white' : 'text-zinc-400'
+          }`}
+        >
+          <Users className="w-3.5 h-3.5" />
+          FACES
         </button>
       </nav>
     </div>

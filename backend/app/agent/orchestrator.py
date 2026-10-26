@@ -6,6 +6,7 @@ import httpx
 from sqlalchemy import select, func, delete
 from app.db.session import AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone
+from app.services.face_engine import face_engine
 
 WORKSTATION_GPU_URL = os.getenv("WORKSTATION_OLLAMA_URL", "http://192.168.1.223:11434")
 SNAPSHOT_DIR = "/tmp/command_snapshots"
@@ -49,10 +50,32 @@ async def deep_inspect_detection(event_id: int) -> dict:
                 return {"error": "Event not found"}
 
             crop_path = f"{SNAPSHOT_DIR}/crop_{ev.attributes}" if ev.attributes else ""
+            recognized_face = None
+            face_info = None
+
+            if ev.category == "person" and os.path.exists(crop_path):
+                face_info = await face_engine.process_snapshot_biometrics(crop_path)
+                if face_info:
+                    fname = face_info["name"]
+                    frole = face_info["role"]
+                    fsightings = face_info["sightings"]
+                    if frole == "visitor":
+                        recognized_face = f"{fname} (Seen {fsightings}x)"
+                        ev.sub_type = f"ID: {fname} ({fsightings}x)"
+                    elif frole == "watchlist":
+                        recognized_face = f"⚠️ WATCHLIST: {fname} (Seen {fsightings}x)"
+                        ev.sub_type = f"⚠️ WATCHLIST: {fname}"
+                        ev.full_label = f"{ev.motion_slot}_{fname}_BREACH"
+                    else:
+                        recognized_face = f"{fname} (Seen {fsightings}x)"
+                        ev.sub_type = f"ID: {fname}"
+                        ev.full_label = f"{ev.motion_slot}_{fname}"
+
             gpu_online, models = await probe_workstation_ollama()
             chosen_vlm = pick_best_vlm(models) if gpu_online else None
             is_breach = "BREACH" in (ev.full_label or "")
-            breach_prefix = "🚨 [TRIPWIRE BREACH] " if is_breach else ""
+            breach_prefix = "🚨 [BREACH] " if is_breach else ""
+            face_prefix = f"🧬 [{recognized_face}] " if recognized_face else ""
 
             if chosen_vlm and os.path.exists(crop_path):
                 try:
@@ -61,11 +84,13 @@ async def deep_inspect_detection(event_id: int) -> dict:
 
                     prompt = (
                         f"Analyze this security camera crop from '{ev.camera_id}' (detector guess: {ev.category}). "
+                        "Note: grayscale images are infrared night vision on dry pavement (never water/flooding). "
+                        "Cool-blue or bright white headlights are normal aftermarket LED headlights—NEVER call a car an emergency/police vehicle unless roof lightbars and agency decals are clearly visible. "
                         "If this is an inanimate object (trash bin, mailbox, shadow), set valid_target to false and category to false_alarm. "
                         "Respond ONLY with valid JSON: "
                         '{"valid_target": true, "category": "person|vehicle|animal|false_alarm", '
-                        '"sub_type": "short 1-3 word label like white suv, pickup truck, or person", '
-                        '"summary": "Concise 10-18 word description of true paint/clothing color, vehicle type, and action"}'
+                        '"sub_type": "short 1-3 word label like white suv, sedan, or person", '
+                        '"summary": "Concise 12-20 word description of clothing/paint color, estimated build/features, vehicle type, and action"}'
                     )
 
                     async with httpx.AsyncClient(timeout=35.0) as client:
@@ -88,30 +113,42 @@ async def deep_inspect_detection(event_id: int) -> dict:
                             vlm_sub = str(parsed.get("sub_type", ev.sub_type)).strip().lower()
                             summary = str(parsed.get("summary", "")).strip()
 
-                            if not valid or vlm_cat == "false_alarm":
+                            if (not valid or vlm_cat == "false_alarm") and not recognized_face:
                                 await session.execute(delete(DetectionEvent).where(DetectionEvent.id == ev.id))
                                 await session.commit()
                                 return {"id": ev.id, "purged": True, "ai_notes": "Purged inanimate false positive"}
 
-                            if vlm_cat in ("person", "vehicle", "animal"):
+                            if vlm_cat in ("person", "vehicle", "animal") and not recognized_face:
                                 ev.category = vlm_cat
                                 suffix = "_BREACH" if is_breach else ""
                                 ev.full_label = f"{ev.motion_slot}_{vlm_cat}{suffix}"
 
-                            if vlm_sub and len(vlm_sub) <= 32:
+                            if vlm_sub and len(vlm_sub) <= 32 and not recognized_face:
                                 ev.sub_type = vlm_sub
 
-                            ev.ai_notes = f"{breach_prefix}[RTX 3060 Ti // {chosen_vlm}] {summary}"
+                            ev.ai_notes = f"{breach_prefix}{face_prefix}[RTX 3060 Ti // {chosen_vlm}] {summary}"
                             await session.commit()
-                            return {"id": ev.id, "ai_notes": ev.ai_notes, "engine": f"RTX 3060 Ti // {chosen_vlm}"}
+                            return {
+                                "id": ev.id,
+                                "sub_type": ev.sub_type,
+                                "full_label": ev.full_label,
+                                "ai_notes": ev.ai_notes,
+                                "engine": f"RTX 3060 Ti // {chosen_vlm}",
+                            }
                 except Exception as e:
                     print(f"[VLM ERROR] {e}")
 
             ev.ai_notes = (
-                f"{breach_prefix}[YOLOv8s EDGE] {ev.sub_type.upper()} ({int(ev.confidence * 100)}% conf)"
+                f"{breach_prefix}{face_prefix}[YOLOv8s EDGE] {ev.sub_type.upper()} ({int(ev.confidence * 100)}% conf)"
             )
             await session.commit()
-            return {"id": ev.id, "ai_notes": ev.ai_notes, "engine": "EDGE_FALLBACK"}
+            return {
+                "id": ev.id,
+                "sub_type": ev.sub_type,
+                "full_label": ev.full_label,
+                "ai_notes": ev.ai_notes,
+                "engine": "EDGE_FALLBACK",
+            }
 
 
 async def process_command_prompt(prompt: str) -> dict:
@@ -185,6 +222,7 @@ async def process_command_prompt(prompt: str) -> dict:
         sys_context = (
             "You are COMMAND, the tactical AI operating NasonNation's security & robotics node. "
             "Cameras: DRIVEWAY (annke_1), LOFT (tapo_1), LIVING_ROOM (tapo_2). "
+            f"Enrolled Face Vectors: {len(face_engine.gallery)}. "
             f"Database totals: {counts}. Tripwire breaches: {breach_count}. Active zones: {len(zones)}. "
             f"Last 5 detections: {recent_summary}. "
             "Answer the operator's query directly and concisely in 1-2 tactical sentences."
@@ -205,7 +243,7 @@ async def process_command_prompt(prompt: str) -> dict:
     total_all = sum(counts.values())
     return {
         "reply": (
-            f"TELEMETRY SUMMARY: {total_all} verified events "
+            f"TELEMETRY SUMMARY: {total_all} verified events | Enrolled Faces: {len(face_engine.gallery)} "
             f"(Person: {counts.get('person', 0)} | Vehicle: {counts.get('vehicle', 0)} | Animal: {counts.get('animal', 0)} | Breaches: {breach_count}). "
             f"Recent: {recent_summary}."
         ),

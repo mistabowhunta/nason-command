@@ -6,3 +6,10 @@ dist/
 pg_data/
 *.tflite
 mediamtx/mediamtx.yml
+
+# Biometric reference images & ONNX model weights
+backend/app/known_faces/
+backend/app/models_zoo/*.onnx
+*.onnx
+*.pt
+*.sh

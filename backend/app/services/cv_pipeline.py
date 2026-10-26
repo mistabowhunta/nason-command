@@ -12,6 +12,7 @@ import onnxruntime as ort
 from app.db.session import AsyncSessionLocal
 from app.db.models import DetectionEvent
 from app.agent.orchestrator import deep_inspect_detection
+from app.services.face_engine import face_engine
 
 cv2.setNumThreads(1)
 
@@ -38,6 +39,18 @@ MIN_CONF_BY_CATEGORY = {
     "vehicle": 0.45,
     "animal": 0.58,
 }
+
+
+def compute_iou(a: dict, b: dict) -> float:
+    ax1, ay1, ax2, ay2 = a["x"], a["y"], a["x"] + a["w"], a["y"] + a["h"]
+    bx1, by1, bx2, by2 = b["x"], b["y"], b["x"] + b["w"], b["y"] + b["h"]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = (ix2 - ix1) * (iy2 - iy1)
+    union = (a["w"] * a["h"]) + (b["w"] * b["h"]) - inter
+    return inter / max(0.0001, union)
 
 
 def point_in_polygon(x: float, y: float, poly: list[dict]) -> bool:
@@ -99,6 +112,47 @@ def bbox_intersection_ratio(det: dict, motion_boxes: list[tuple[float, float, fl
     return min(1.0, overlap_sum / det_area)
 
 
+class ParkedVehicleRegistry:
+    def __init__(self):
+        self.parked_footprints: list[dict] = []
+
+    def filter_and_lock_vehicles(self, detections: list[dict]) -> list[dict]:
+        now = time.time()
+        self.parked_footprints = [p for p in self.parked_footprints if now - p["last_seen"] < 21600.0]
+
+        for det in detections:
+            if det["category"] != "vehicle":
+                det["is_parked_vehicle"] = False
+                continue
+
+            matched_fp = None
+            for fp in self.parked_footprints:
+                if compute_iou(det, fp) >= 0.68:
+                    matched_fp = fp
+                    break
+
+            if matched_fp is not None:
+                matched_fp["x"] = matched_fp["x"] * 0.85 + det["x"] * 0.15
+                matched_fp["y"] = matched_fp["y"] * 0.85 + det["y"] * 0.15
+                matched_fp["w"] = matched_fp["w"] * 0.85 + det["w"] * 0.15
+                matched_fp["h"] = matched_fp["h"] * 0.85 + det["h"] * 0.15
+                matched_fp["last_seen"] = now
+                matched_fp["sightings"] += 1
+                det["is_parked_vehicle"] = matched_fp["sightings"] >= 3
+            else:
+                self.parked_footprints.append({
+                    "x": det["x"],
+                    "y": det["y"],
+                    "w": det["w"],
+                    "h": det["h"],
+                    "last_seen": now,
+                    "sightings": 1,
+                })
+                det["is_parked_vehicle"] = False
+
+        return detections
+
+
 class LatestFrameGrabber:
     def __init__(self, rtsp_url: str):
         self.rtsp_url = rtsp_url
@@ -140,12 +194,6 @@ class LatestFrameGrabber:
 
 
 class TrueDisplacementTracker:
-    """
-    Requires BOTH:
-    1. Active pixel motion inside the bounding box on the current frame (motion_ratio >= 0.25 for vehicles).
-    2. True multi-frame spatial travel (>= 7.5% of screen width for vehicles, >= 4.5% for people)
-       plus active frame-to-frame step velocity so parked cars can never latch on.
-    """
     def __init__(self):
         self.tracks: dict[int, dict] = {}
         self.spatial_cooldowns: list[dict] = []
@@ -154,15 +202,15 @@ class TrueDisplacementTracker:
 
     def update(
         self,
+        frame: np.ndarray,
         raw_detections: list[dict],
         motion_boxes: list[tuple[float, float, float, float]],
         cam_zones: list[dict],
     ) -> tuple[list[dict], list[dict]]:
         now = time.time()
 
-        # Expire old tracks & spatial cooldowns
         self.tracks = {
-            slot: t for slot, t in self.tracks.items() if now - t["last_seen"] < 30.0
+            slot: t for slot, t in self.tracks.items() if now - t["last_seen"] < 25.0
         }
         self.spatial_cooldowns = [
             c for c in self.spatial_cooldowns if now - c["time"] < 120.0
@@ -174,11 +222,10 @@ class TrueDisplacementTracker:
             self.last_valid_boxes = []
             return [], []
 
-        unmatched_dets = list(raw_detections[:10])
+        unmatched_dets = [d for d in raw_detections[:10] if not d.get("is_parked_vehicle", False)]
         assigned: list[tuple[int, dict]] = []
         used_slots: set[int] = set()
 
-        # PASS 1: Tight Stationary Match (< 0.055) so parked cars stay pinned to their resting slot
         for det in list(unmatched_dets):
             cx = det["x"] + det["w"] / 2.0
             cy = det["y"] + det["h"] / 2.0
@@ -199,24 +246,29 @@ class TrueDisplacementTracker:
                 step_disp = math.hypot(cx - tr["cx"], cy - tr["cy"])
                 tr["cx"] = cx
                 tr["cy"] = cy
+                tr["area"] = det["area"]
                 tr["last_seen"] = now
-                tr["history"].append((cx, cy, now))
+                tr["history"].append((cx, cy, step_disp, now))
                 det["step_disp"] = step_disp
                 assigned.append((best_slot, det))
                 unmatched_dets.remove(det)
 
-        # PASS 2: Fast Moving Target Match (up to 0.50 for street vehicles, 0.30 for people)
         for det in list(unmatched_dets):
             cx = det["x"] + det["w"] / 2.0
             cy = det["y"] + det["h"] / 2.0
             best_slot = None
-            max_jump = 0.50 if det["category"] == "vehicle" else 0.30
+            max_jump = 0.38 if det["category"] == "vehicle" else 0.28
             best_dist = max_jump
 
             for slot, track in self.tracks.items():
                 if slot in used_slots or track["category"] != det["category"]:
                     continue
-                if now - track["last_seen"] > 2.0:
+                if now - track["last_seen"] > 1.6:
+                    continue
+                area_ratio = max(det["area"], track.get("area", det["area"])) / max(
+                    0.0005, min(det["area"], track.get("area", det["area"]))
+                )
+                if area_ratio > 2.1:
                     continue
                 dist = math.hypot(cx - track["cx"], cy - track["cy"])
                 if dist < best_dist:
@@ -229,13 +281,13 @@ class TrueDisplacementTracker:
                 step_disp = math.hypot(cx - tr["cx"], cy - tr["cy"])
                 tr["cx"] = cx
                 tr["cy"] = cy
+                tr["area"] = det["area"]
                 tr["last_seen"] = now
-                tr["history"].append((cx, cy, now))
+                tr["history"].append((cx, cy, step_disp, now))
                 det["step_disp"] = step_disp
                 assigned.append((best_slot, det))
                 unmatched_dets.remove(det)
 
-        # PASS 3: New object registration (starts with 0 displacement so it cannot fire on frame 1)
         for det in unmatched_dets:
             cx = det["x"] + det["w"] / 2.0
             cy = det["y"] + det["h"] / 2.0
@@ -246,9 +298,13 @@ class TrueDisplacementTracker:
             self.tracks[slot] = {
                 "cx": cx,
                 "cy": cy,
+                "area": det["area"],
                 "category": det["category"],
+                "face_name": None,
+                "face_role": None,
+                "face_sightings": 1,
                 "last_seen": now,
-                "history": deque([(cx, cy, now)], maxlen=8),
+                "history": deque([(cx, cy, 0.0, now)], maxlen=8),
             }
             det["step_disp"] = 0.0
             assigned.append((slot, det))
@@ -263,39 +319,58 @@ class TrueDisplacementTracker:
             if len(hist) < 2:
                 continue
 
-            # 1. Check live pixel motion overlap inside this bounding box RIGHT NOW
             motion_ratio = bbox_intersection_ratio(det, motion_boxes)
-            req_motion = 0.25 if det["category"] == "vehicle" else 0.06
+            req_motion = 0.25 if det["category"] == "vehicle" else 0.05
             if motion_ratio < req_motion:
                 continue
 
-            # 2. Check net displacement across recent track history AND current frame step velocity
-            oldest_cx, oldest_cy, _ = hist[0]
+            oldest_cx, oldest_cy, _, _ = hist[0]
             net_disp = math.hypot(tr["cx"] - oldest_cx, tr["cy"] - oldest_cy)
             step_disp = det.get("step_disp", 0.0)
 
-            req_net_disp = 0.075 if det["category"] == "vehicle" else 0.042
-            req_step_disp = 0.016 if det["category"] == "vehicle" else 0.010
+            req_net_disp = 0.080 if det["category"] == "vehicle" else 0.038
+            req_step_disp = 0.016 if det["category"] == "vehicle" else 0.009
 
-            # If it hasn't traveled across the frame AND moved on this frame, it is stationary!
             if net_disp < req_net_disp or step_disp < req_step_disp:
                 continue
 
-            # 3. Check Tripwire Breach only for verified moving targets
-            is_breach = False
-            for z in cam_zones:
-                if z["zone_type"] == "tripwire" and bbox_touches_polygon(det, z["points"]):
-                    is_breach = True
-                    break
+            if det["category"] == "person":
+                fname, frole, _, fsightings = face_engine.identify_person_in_frame(frame, det)
+                if fname:
+                    tr["face_name"] = fname
+                    tr["face_role"] = frole
+                    tr["face_sightings"] = fsightings
+
+            recognized_name = tr.get("face_name")
+            recognized_role = tr.get("face_role")
+            recognized_sightings = tr.get("face_sightings", 1)
+
+            # Watchlist faces ALWAYS trigger an immediate breach alert!
+            is_breach = recognized_role == "watchlist"
+            if not is_breach:
+                for z in cam_zones:
+                    if z["zone_type"] == "tripwire" and bbox_touches_polygon(det, z["points"]):
+                        is_breach = False if recognized_role == "whitelist" else True
+                        break
 
             slot_name = f"Motion_{slot}"
             suffix = "_BREACH" if is_breach else ""
-            full_label = f"{slot_name}_{det['category']}{suffix}"
+            if recognized_name:
+                full_label = f"{slot_name}_{recognized_name}{suffix}"
+                if recognized_role == "visitor":
+                    sub_type_label = f"ID: {recognized_name} ({recognized_sightings}x)"
+                elif recognized_role == "watchlist":
+                    sub_type_label = f"⚠️ WATCHLIST: {recognized_name}"
+                else:
+                    sub_type_label = f"ID: {recognized_name}"
+            else:
+                full_label = f"{slot_name}_{det['category']}{suffix}"
+                sub_type_label = det["sub_type"]
 
             box_item = {
                 "slot": slot_name,
                 "category": det["category"],
-                "sub_type": det["sub_type"],
+                "sub_type": sub_type_label,
                 "attributes": "",
                 "full_label": full_label,
                 "confidence": round(det["confidence"], 2),
@@ -307,7 +382,6 @@ class TrueDisplacementTracker:
             }
             active_output.append(box_item)
 
-            # 4. Spatial Cooldown: prevent logging multiple events at the same coordinates
             already_logged_here = any(
                 c["category"] == det["category"]
                 and math.hypot(tr["cx"] - c["cx"], tr["cy"] - c["cy"]) < 0.14
@@ -350,7 +424,6 @@ class EdgeCVEngine:
         self.grabbers: list[LatestFrameGrabber] = []
         self.infer_lock = threading.Lock()
 
-        print(f"[CV ENGINE] Loading ONNX model: {MODEL_PATH}")
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 2
         sess_opts.inter_op_num_threads = 1
@@ -495,6 +568,7 @@ class EdgeCVEngine:
 
         bg_sub = cv2.createBackgroundSubtractorMOG2(history=400, varThreshold=22, detectShadows=False)
         tracker = TrueDisplacementTracker()
+        parked_registry = ParkedVehicleRegistry()
         last_processed_time = 0.0
 
         while self.running:
@@ -521,7 +595,7 @@ class EdgeCVEngine:
             cam_zones = self.get_zones(stream_name)
 
             if not motion_boxes:
-                active_out, _ = tracker.update([], [], cam_zones)
+                active_out, _ = tracker.update(frame, [], [], cam_zones)
                 self.latest_detections[stream_name] = active_out
                 continue
 
@@ -537,8 +611,10 @@ class EdgeCVEngine:
 
                 candidate_detections.append(det)
 
+            candidate_detections = parked_registry.filter_and_lock_vehicles(candidate_detections)
             candidate_detections.sort(key=lambda d: d["area"], reverse=True)
-            active_out, db_events = tracker.update(candidate_detections, motion_boxes, cam_zones)
+
+            active_out, db_events = tracker.update(frame, candidate_detections, motion_boxes, cam_zones)
             self.latest_detections[stream_name] = active_out
 
             if db_events and self.is_camera_recording(stream_name):

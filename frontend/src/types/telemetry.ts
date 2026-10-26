@@ -34,6 +34,16 @@ export interface CameraScheduleConfig {
   server_time?: string;
 }
 
+export interface KnownFaceItem {
+  id: number;
+  name: string;
+  role: 'whitelist' | 'visitor' | 'watchlist';
+  sample_crop: string | null;
+  sightings: number;
+  last_seen: string | null;
+  created_at: string | null;
+}
+
 export interface PersistedDetectionEvent {
   id: number;
   timestamp: string;

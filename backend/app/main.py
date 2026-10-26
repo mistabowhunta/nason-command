@@ -1,21 +1,29 @@
 import asyncio
+import base64
 import glob
 import json
 import os
+import time
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+import cv2
+import httpx
+import numpy as np
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import select, delete, text
 from app.api.ws import router as ws_router, telemetry_and_cv_broadcaster
 from app.db.session import init_db, AsyncSessionLocal
-from app.db.models import DetectionEvent, CameraZone, CameraSchedule
+from app.db.models import DetectionEvent, CameraZone, CameraSchedule, KnownFace
 from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, SNAPSHOT_DIR
+from app.services.face_engine import face_engine, FACE_CROPS_DIR
 from app.agent.orchestrator import deep_inspect_detection, process_command_prompt
 
 STREAMS = ["annke_1", "tapo_1", "tapo_2"]
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+os.makedirs(FACE_CROPS_DIR, exist_ok=True)
 
 
 class PointDTO(BaseModel):
@@ -31,9 +39,31 @@ class CreateZoneDTO(BaseModel):
 
 
 class ScheduleDTO(BaseModel):
-    mode: str        # 'always_record' | 'paused' | 'schedule'
-    start_time: str  # 'HH:MM'
-    end_time: str    # 'HH:MM'
+    mode: str
+    start_time: str
+    end_time: str
+
+
+class EnrollFaceDTO(BaseModel):
+    name: str
+    role: str = "whitelist"
+
+
+class UpdateFaceDTO(BaseModel):
+    name: str
+    role: str
+
+
+class UploadFaceImageDTO(BaseModel):
+    name: str
+    role: str = "watchlist"
+    image_base64: str
+
+
+class ScrapeFaceUrlDTO(BaseModel):
+    name: str
+    role: str = "watchlist"
+    image_url: str
 
 
 class AgentCommandDTO(BaseModel):
@@ -79,6 +109,7 @@ async def sync_schedules_to_engine(cv_engine: EdgeCVEngine):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await face_engine.sync_gallery_from_db_and_disk()
     loop = asyncio.get_running_loop()
     event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -107,12 +138,198 @@ app.add_middleware(
 )
 
 app.mount("/snapshots", StaticFiles(directory=SNAPSHOT_DIR), name="snapshots")
+app.mount("/face_crops", StaticFiles(directory=FACE_CROPS_DIR), name="face_crops")
 app.include_router(ws_router)
 
 
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ONLINE", "system": "NasonNation | Command"}
+    return {
+        "status": "ONLINE",
+        "system": "NasonNation | Command",
+        "enrolled_faces": len(face_engine.gallery),
+    }
+
+
+@app.get("/api/faces")
+async def list_enrolled_faces():
+    items = await face_engine.sync_gallery_from_db_and_disk()
+    return [
+        {
+            "id": f["id"],
+            "name": f["name"],
+            "role": f["role"],
+            "sample_crop": f["sample_crop"],
+            "sightings": f["sightings"],
+            "last_seen": f["last_seen"],
+            "created_at": f["created_at"],
+        }
+        for f in items
+    ]
+
+
+@app.patch("/api/faces/{face_id}")
+async def update_face_entry(face_id: int, payload: UpdateFaceDTO):
+    clean_name = payload.name.strip().upper()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+    async with AsyncSessionLocal() as session:
+        row = await session.get(KnownFace, face_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Face vector not found")
+        row.name = clean_name
+        row.role = payload.role
+        await session.commit()
+    return await list_enrolled_faces()
+
+
+@app.delete("/api/faces/{face_id}")
+async def delete_face_entry(face_id: int):
+    async with AsyncSessionLocal() as session:
+        row = await session.get(KnownFace, face_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Face vector not found")
+        await session.execute(delete(KnownFace).where(KnownFace.id == face_id))
+        await session.commit()
+    return await list_enrolled_faces()
+
+
+@app.post("/api/faces/enroll_image")
+async def enroll_face_from_uploaded_image(payload: UploadFaceImageDTO):
+    clean_name = payload.name.strip().upper()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    b64_str = payload.image_base64
+    if "," in b64_str:
+        b64_str = b64_str.split(",", 1)[1]
+
+    try:
+        raw_bytes = base64.b64decode(b64_str)
+        np_arr = np.frombuffer(raw_bytes, np.uint8)
+        img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image file")
+
+    vec, _, face_crop = face_engine.extract_face_data(img)
+    if vec is None:
+        raise HTTPException(status_code=422, detail="YuNet could not detect a clear face in the uploaded photo.")
+
+    fname = f"upload_{clean_name}_{int(time.time() * 1000)}.jpg"
+    cv2.imwrite(f"{FACE_CROPS_DIR}/{fname}", face_crop if face_crop is not None else img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+
+    async with AsyncSessionLocal() as session:
+        row = KnownFace(
+            name=clean_name,
+            role=payload.role,
+            embedding_json=json.dumps(vec.tolist()),
+            sample_crop=f"/face_crops/{fname}",
+            sightings=1,
+            last_seen=datetime.now(timezone.utc),
+        )
+        session.add(row)
+        await session.commit()
+
+    return await list_enrolled_faces()
+
+
+@app.post("/api/faces/enroll_url")
+async def enroll_face_from_url(payload: ScrapeFaceUrlDTO):
+    clean_name = payload.name.strip().upper()
+    if not clean_name or not payload.image_url.strip():
+        raise HTTPException(status_code=400, detail="Name and Image URL are required")
+
+    try:
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            resp = await client.get(payload.image_url.strip(), headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"HTTP {resp.status_code} fetching URL")
+            np_arr = np.frombuffer(resp.content, np.uint8)
+            img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download image URL: {e}")
+
+    vec, _, face_crop = face_engine.extract_face_data(img)
+    if vec is None:
+        raise HTTPException(status_code=422, detail="YuNet could not isolate a clear face from that URL.")
+
+    fname = f"url_{clean_name}_{int(time.time() * 1000)}.jpg"
+    cv2.imwrite(f"{FACE_CROPS_DIR}/{fname}", face_crop if face_crop is not None else img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+
+    async with AsyncSessionLocal() as session:
+        row = KnownFace(
+            name=clean_name,
+            role=payload.role,
+            embedding_json=json.dumps(vec.tolist()),
+            sample_crop=f"/face_crops/{fname}",
+            sightings=1,
+            last_seen=datetime.now(timezone.utc),
+        )
+        session.add(row)
+        await session.commit()
+
+    return await list_enrolled_faces()
+
+
+@app.post("/api/detections/{event_id}/enroll_face")
+async def enroll_face_from_detection(event_id: int, payload: EnrollFaceDTO):
+    clean_name = payload.name.strip().upper()
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(DetectionEvent).where(DetectionEvent.id == event_id))
+        ev = result.scalar_one_or_none()
+        if not ev or not ev.attributes:
+            raise HTTPException(status_code=404, detail="Detection snapshot not found")
+
+        crop_path = f"{SNAPSHOT_DIR}/crop_{ev.attributes}"
+        full_path = f"{SNAPSHOT_DIR}/full_{ev.attributes}"
+
+        vec, _, face_crop = (None, 0.0, None)
+        if os.path.exists(crop_path):
+            vec, _, face_crop = face_engine.extract_face_data(cv2.imread(crop_path))
+        if vec is None and os.path.exists(full_path):
+            vec, _, face_crop = face_engine.extract_face_data(cv2.imread(full_path))
+
+        if vec is None:
+            raise HTTPException(
+                status_code=422,
+                detail="YuNet could not isolate a clear face in this snapshot. Try a closer front/angled frame.",
+            )
+
+        persistent_fname = f"enrolled_{clean_name}_{int(time.time() * 1000)}.jpg"
+        if face_crop is not None:
+            cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        elif os.path.exists(crop_path):
+            cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", cv2.imread(crop_path))
+
+        row = KnownFace(
+            name=clean_name,
+            role=payload.role,
+            embedding_json=json.dumps(vec.tolist()),
+            sample_crop=f"/face_crops/{persistent_fname}",
+            sightings=1,
+            last_seen=datetime.now(timezone.utc),
+        )
+        session.add(row)
+
+        ev.sub_type = f"⚠️ WATCHLIST: {clean_name}" if payload.role == "watchlist" else f"ID: {clean_name}"
+        ev.full_label = f"{ev.motion_slot}_{clean_name}"
+        ev.ai_notes = f"🧬 [ENROLLED {payload.role.upper()}: {clean_name}] {ev.ai_notes or ''}"
+        await session.commit()
+
+    await face_engine.sync_gallery_from_db_and_disk()
+    return {
+        "status": "ENROLLED",
+        "name": clean_name,
+        "sub_type": ev.sub_type,
+        "full_label": ev.full_label,
+        "ai_notes": ev.ai_notes,
+        "total_faces": len(face_engine.gallery),
+    }
 
 
 @app.get("/api/cameras/schedules")

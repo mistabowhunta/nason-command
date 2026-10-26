@@ -42,6 +42,19 @@ class CameraSchedule(Base):
     __tablename__ = "camera_schedules"
 
     camera_id: Mapped[str] = mapped_column(String(50), primary_key=True)
-    mode: Mapped[str] = mapped_column(String(24), default="always_record")  # 'always_record' | 'paused' | 'schedule'
-    start_time: Mapped[str] = mapped_column(String(10), default="21:00")    # HH:MM (America/Los_Angeles)
-    end_time: Mapped[str] = mapped_column(String(10), default="06:00")      # HH:MM (America/Los_Angeles)
+    mode: Mapped[str] = mapped_column(String(24), default="always_record")
+    start_time: Mapped[str] = mapped_column(String(10), default="21:00")
+    end_time: Mapped[str] = mapped_column(String(10), default="06:00")
+
+
+class KnownFace(Base):
+    __tablename__ = "known_faces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
+    role: Mapped[str] = mapped_column(String(24), default="whitelist")  # 'whitelist' | 'visitor' | 'watchlist'
+    embedding_json: Mapped[str] = mapped_column(Text)
+    sample_crop: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    sightings: Mapped[int] = mapped_column(Integer, default=1)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
