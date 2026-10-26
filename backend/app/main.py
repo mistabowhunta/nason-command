@@ -19,6 +19,7 @@ from app.db.session import init_db, AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone, CameraSchedule, KnownFace
 from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, SNAPSHOT_DIR
 from app.services.face_engine import face_engine, FACE_CROPS_DIR
+from app.services.watchlist_scraper import periodic_watchlist_worker, sync_public_mugshot_feeds
 from app.agent.orchestrator import deep_inspect_detection, process_command_prompt
 
 STREAMS = ["annke_1", "tapo_1", "tapo_2"]
@@ -121,10 +122,12 @@ async def lifespan(app: FastAPI):
 
     ws_task = asyncio.create_task(telemetry_and_cv_broadcaster(cv_engine))
     db_task = asyncio.create_task(db_persistence_worker(event_queue))
+    scraper_task = asyncio.create_task(periodic_watchlist_worker())
     yield
     cv_engine.stop()
     ws_task.cancel()
     db_task.cancel()
+    scraper_task.cancel()
 
 
 app = FastAPI(title="NasonNation | Command API", lifespan=lifespan)
@@ -154,18 +157,32 @@ async def health_check():
 @app.get("/api/faces")
 async def list_enrolled_faces():
     items = await face_engine.sync_gallery_from_db_and_disk()
-    return [
+    # Keep background auto-scraped mugshot vectors hidden from UI cards unless they have been sighted (>0)
+    visible = [
         {
             "id": f["id"],
             "name": f["name"],
-            "role": f["role"],
-            "sample_crop": f["sample_crop"],
+            "role": "watchlist" if f["role"] == "watchlist_auto" else f["role"],
+            "sample_crop": f["sample_crop"] if str(f["sample_crop"] or "").startswith("/") else None,
             "sightings": f["sightings"],
             "last_seen": f["last_seen"],
             "created_at": f["created_at"],
         }
         for f in items
+        if f["role"] != "watchlist_auto" or f.get("sightings", 0) > 0
     ]
+    return visible
+
+
+@app.get("/api/faces/watchlist_status")
+async def get_watchlist_status():
+    auto_count = sum(1 for f in face_engine.gallery if f["role"] == "watchlist_auto")
+    return {"auto_watchlist_vectors": auto_count}
+
+
+@app.post("/api/faces/sync_watchlist")
+async def trigger_watchlist_sync():
+    return await sync_public_mugshot_feeds()
 
 
 @app.patch("/api/faces/{face_id}")

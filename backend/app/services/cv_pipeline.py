@@ -346,7 +346,7 @@ class TrueDisplacementTracker:
             recognized_sightings = tr.get("face_sightings", 1)
 
             # Watchlist faces ALWAYS trigger an immediate breach alert!
-            is_breach = recognized_role == "watchlist"
+            is_breach = recognized_role in ("watchlist", "watchlist_auto")
             if not is_breach:
                 for z in cam_zones:
                     if z["zone_type"] == "tripwire" and bbox_touches_polygon(det, z["points"]):
@@ -359,7 +359,7 @@ class TrueDisplacementTracker:
                 full_label = f"{slot_name}_{recognized_name}{suffix}"
                 if recognized_role == "visitor":
                     sub_type_label = f"ID: {recognized_name} ({recognized_sightings}x)"
-                elif recognized_role == "watchlist":
+                elif recognized_role in ("watchlist", "watchlist_auto"):
                     sub_type_label = f"⚠️ WATCHLIST: {recognized_name}"
                 else:
                     sub_type_label = f"ID: {recognized_name}"

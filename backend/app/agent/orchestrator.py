@@ -62,7 +62,7 @@ async def deep_inspect_detection(event_id: int) -> dict:
                     if frole == "visitor":
                         recognized_face = f"{fname} (Seen {fsightings}x)"
                         ev.sub_type = f"ID: {fname} ({fsightings}x)"
-                    elif frole == "watchlist":
+                    elif frole in ("watchlist", "watchlist_auto"):
                         recognized_face = f"⚠️ WATCHLIST: {fname} (Seen {fsightings}x)"
                         ev.sub_type = f"⚠️ WATCHLIST: {fname}"
                         ev.full_label = f"{ev.motion_slot}_{fname}_BREACH"
