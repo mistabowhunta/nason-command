@@ -7,6 +7,7 @@ from sqlalchemy import select, func, delete
 from app.db.session import AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone
 from app.services.face_engine import face_engine
+from app.services.push_notifier import get_push_config, send_tactical_push, CAM_NAMES
 
 WORKSTATION_GPU_URL = os.getenv("WORKSTATION_OLLAMA_URL", "http://192.168.1.223:11434")
 SNAPSHOT_DIR = "/tmp/command_snapshots"
@@ -51,18 +52,18 @@ async def deep_inspect_detection(event_id: int) -> dict:
 
             crop_path = f"{SNAPSHOT_DIR}/crop_{ev.attributes}" if ev.attributes else ""
             recognized_face = None
-            face_info = None
+            face_role = None
 
             if ev.category == "person" and os.path.exists(crop_path):
                 face_info = await face_engine.process_snapshot_biometrics(crop_path)
                 if face_info:
                     fname = face_info["name"]
-                    frole = face_info["role"]
+                    face_role = face_info["role"]
                     fsightings = face_info["sightings"]
-                    if frole == "visitor":
+                    if face_role == "visitor":
                         recognized_face = f"{fname} (Seen {fsightings}x)"
                         ev.sub_type = f"ID: {fname} ({fsightings}x)"
-                    elif frole in ("watchlist", "watchlist_auto"):
+                    elif face_role in ("watchlist", "watchlist_auto"):
                         recognized_face = f"⚠️ WATCHLIST: {fname} (Seen {fsightings}x)"
                         ev.sub_type = f"⚠️ WATCHLIST: {fname}"
                         ev.full_label = f"{ev.motion_slot}_{fname}_BREACH"
@@ -74,8 +75,11 @@ async def deep_inspect_detection(event_id: int) -> dict:
             gpu_online, models = await probe_workstation_ollama()
             chosen_vlm = pick_best_vlm(models) if gpu_online else None
             is_breach = "BREACH" in (ev.full_label or "")
+            is_watchlist = face_role in ("watchlist", "watchlist_auto") or "WATCHLIST" in (ev.sub_type or "")
             breach_prefix = "🚨 [BREACH] " if is_breach else ""
             face_prefix = f"🧬 [{recognized_face}] " if recognized_face else ""
+            detected_carrier = "NONE"
+            detected_plate = "NONE"
 
             if chosen_vlm and os.path.exists(crop_path):
                 try:
@@ -86,11 +90,14 @@ async def deep_inspect_detection(event_id: int) -> dict:
                         f"Analyze this security camera crop from '{ev.camera_id}' (detector guess: {ev.category}). "
                         "Note: grayscale images are infrared night vision on dry pavement (never water/flooding). "
                         "Cool-blue or bright white headlights are normal aftermarket LED headlights—NEVER call a car an emergency/police vehicle unless roof lightbars and agency decals are clearly visible. "
+                        "If this is a vehicle, read any legible license plate characters into 'plate' (or 'NONE') and check for delivery logos (AMAZON, UPS, FEDEX, USPS, DHL, or NONE) in 'carrier'. "
                         "If this is an inanimate object (trash bin, mailbox, shadow), set valid_target to false and category to false_alarm. "
                         "Respond ONLY with valid JSON: "
                         '{"valid_target": true, "category": "person|vehicle|animal|false_alarm", '
                         '"sub_type": "short 1-3 word label like white suv, sedan, or person", '
-                        '"summary": "Concise 12-20 word description of clothing/paint color, estimated build/features, vehicle type, and action"}'
+                        '"plate": "ABC1234 or NONE", '
+                        '"carrier": "AMAZON|UPS|FEDEX|USPS|NONE", '
+                        '"summary": "Concise 12-20 word description of clothing/paint color, vehicle type, and action"}'
                     )
 
                     async with httpx.AsyncClient(timeout=35.0) as client:
@@ -111,6 +118,8 @@ async def deep_inspect_detection(event_id: int) -> dict:
                             valid = bool(parsed.get("valid_target", True))
                             vlm_cat = str(parsed.get("category", ev.category)).lower()
                             vlm_sub = str(parsed.get("sub_type", ev.sub_type)).strip().lower()
+                            detected_plate = str(parsed.get("plate", "NONE")).strip().upper()
+                            detected_carrier = str(parsed.get("carrier", "NONE")).strip().upper()
                             summary = str(parsed.get("summary", "")).strip()
 
                             if (not valid or vlm_cat == "false_alarm") and not recognized_face:
@@ -123,31 +132,72 @@ async def deep_inspect_detection(event_id: int) -> dict:
                                 suffix = "_BREACH" if is_breach else ""
                                 ev.full_label = f"{ev.motion_slot}_{vlm_cat}{suffix}"
 
-                            if vlm_sub and len(vlm_sub) <= 32 and not recognized_face:
-                                ev.sub_type = vlm_sub
+                            if not recognized_face:
+                                alpr_tags = []
+                                if detected_carrier not in ("", "NONE", "NULL", "N/A"):
+                                    alpr_tags.append(f"📦 {detected_carrier}")
+                                if detected_plate not in ("", "NONE", "NULL", "N/A", "UNKNOWN") and len(detected_plate) >= 3:
+                                    alpr_tags.append(f"🔢 {detected_plate}")
 
-                            ev.ai_notes = f"{breach_prefix}{face_prefix}[RTX 3060 Ti // {chosen_vlm}] {summary}"
+                                if alpr_tags:
+                                    ev.sub_type = " · ".join(alpr_tags)[:48]
+                                elif vlm_sub and len(vlm_sub) <= 32:
+                                    ev.sub_type = vlm_sub
+
+                            alpr_note = ""
+                            if detected_carrier not in ("", "NONE", "NULL"):
+                                alpr_note += f"[CARRIER: {detected_carrier}] "
+                            if detected_plate not in ("", "NONE", "NULL", "UNKNOWN") and len(detected_plate) >= 3:
+                                alpr_note += f"[PLATE: {detected_plate}] "
+
+                            ev.ai_notes = f"{breach_prefix}{face_prefix}{alpr_note}[RTX 3060 Ti // {chosen_vlm}] {summary}"
                             await session.commit()
-                            return {
-                                "id": ev.id,
-                                "sub_type": ev.sub_type,
-                                "full_label": ev.full_label,
-                                "ai_notes": ev.ai_notes,
-                                "engine": f"RTX 3060 Ti // {chosen_vlm}",
-                            }
                 except Exception as e:
                     print(f"[VLM ERROR] {e}")
 
-            ev.ai_notes = (
-                f"{breach_prefix}{face_prefix}[YOLOv8s EDGE] {ev.sub_type.upper()} ({int(ev.confidence * 100)}% conf)"
-            )
-            await session.commit()
+            if not ev.ai_notes:
+                ev.ai_notes = (
+                    f"{breach_prefix}{face_prefix}[YOLOv8s EDGE] {ev.sub_type.upper()} ({int(ev.confidence * 100)}% conf)"
+                )
+                await session.commit()
+
+            # Trigger Instant Mobile Push Notification if criteria met (NEVER push for Whitelisted family!)
+            if face_role != "whitelist":
+                push_cfg = await get_push_config()
+                cam_friendly = CAM_NAMES.get(ev.camera_id, ev.camera_id.upper())
+                is_delivery = detected_carrier not in ("", "NONE", "NULL", "N/A")
+
+                if is_watchlist and push_cfg.notify_watchlist:
+                    await send_tactical_push(
+                        title=f"🚨 WATCHLIST MATCH // {cam_friendly}",
+                        message=ev.ai_notes,
+                        crop_path=crop_path,
+                        priority="urgent",
+                        tags="rotating_light,skull",
+                    )
+                elif is_breach and push_cfg.notify_breach:
+                    await send_tactical_push(
+                        title=f"⚠️ TRIPWIRE BREACH // {cam_friendly}",
+                        message=ev.ai_notes,
+                        crop_path=crop_path,
+                        priority="high",
+                        tags="warning,shield",
+                    )
+                elif is_delivery and push_cfg.notify_delivery:
+                    await send_tactical_push(
+                        title=f"📦 {detected_carrier} DELIVERY // {cam_friendly}",
+                        message=ev.ai_notes,
+                        crop_path=crop_path,
+                        priority="default",
+                        tags="package,truck",
+                    )
+
             return {
                 "id": ev.id,
                 "sub_type": ev.sub_type,
                 "full_label": ev.full_label,
                 "ai_notes": ev.ai_notes,
-                "engine": "EDGE_FALLBACK",
+                "engine": f"RTX 3060 Ti // {chosen_vlm}" if chosen_vlm else "EDGE_FALLBACK",
             }
 
 

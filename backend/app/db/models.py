@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Float, Integer, DateTime, Text, func
+from sqlalchemy import Boolean, String, Float, Integer, DateTime, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -52,9 +52,21 @@ class KnownFace(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(64), index=True)
-    role: Mapped[str] = mapped_column(String(24), default="whitelist")  # 'whitelist' | 'visitor' | 'watchlist'
+    role: Mapped[str] = mapped_column(String(24), default="whitelist")
     embedding_json: Mapped[str] = mapped_column(Text)
     sample_crop: Mapped[str | None] = mapped_column(String(160), nullable=True)
     sightings: Mapped[int] = mapped_column(Integer, default=1)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PushSettings(Base):
+    __tablename__ = "push_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    ntfy_topic: Mapped[str] = mapped_column(String(120), default="nason_command_97113")
+    discord_webhook: Mapped[str] = mapped_column(Text, default="")
+    notify_breach: Mapped[bool] = mapped_column(Boolean, default=True)
+    notify_watchlist: Mapped[bool] = mapped_column(Boolean, default=True)
+    notify_delivery: Mapped[bool] = mapped_column(Boolean, default=True)

@@ -4,7 +4,7 @@ import glob
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 import cv2
 import httpx
@@ -16,10 +16,11 @@ from pydantic import BaseModel
 from sqlalchemy import select, delete, text
 from app.api.ws import router as ws_router, telemetry_and_cv_broadcaster
 from app.db.session import init_db, AsyncSessionLocal
-from app.db.models import DetectionEvent, CameraZone, CameraSchedule, KnownFace
+from app.db.models import DetectionEvent, CameraZone, CameraSchedule, KnownFace, PushSettings
 from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, SNAPSHOT_DIR
 from app.services.face_engine import face_engine, FACE_CROPS_DIR
 from app.services.watchlist_scraper import periodic_watchlist_worker, sync_public_mugshot_feeds
+from app.services.push_notifier import get_push_config, send_tactical_push
 from app.agent.orchestrator import deep_inspect_detection, process_command_prompt
 
 STREAMS = ["annke_1", "tapo_1", "tapo_2"]
@@ -65,6 +66,15 @@ class ScrapeFaceUrlDTO(BaseModel):
     name: str
     role: str = "watchlist"
     image_url: str
+
+
+class PushConfigDTO(BaseModel):
+    enabled: bool
+    ntfy_topic: str
+    discord_webhook: str
+    notify_breach: bool
+    notify_watchlist: bool
+    notify_delivery: bool
 
 
 class AgentCommandDTO(BaseModel):
@@ -154,22 +164,62 @@ async def health_check():
     }
 
 
+@app.get("/api/push/settings")
+async def read_push_settings():
+    cfg = await get_push_config()
+    return {
+        "enabled": cfg.enabled,
+        "ntfy_topic": cfg.ntfy_topic,
+        "discord_webhook": cfg.discord_webhook,
+        "notify_breach": cfg.notify_breach,
+        "notify_watchlist": cfg.notify_watchlist,
+        "notify_delivery": cfg.notify_delivery,
+    }
+
+
+@app.post("/api/push/settings")
+async def save_push_settings(payload: PushConfigDTO):
+    async with AsyncSessionLocal() as session:
+        cfg = await session.get(PushSettings, 1)
+        if not cfg:
+            cfg = PushSettings(id=1)
+            session.add(cfg)
+        cfg.enabled = payload.enabled
+        cfg.ntfy_topic = payload.ntfy_topic.strip()
+        cfg.discord_webhook = payload.discord_webhook.strip()
+        cfg.notify_breach = payload.notify_breach
+        cfg.notify_watchlist = payload.notify_watchlist
+        cfg.notify_delivery = payload.notify_delivery
+        await session.commit()
+    return await read_push_settings()
+
+
+@app.post("/api/push/test")
+async def trigger_test_push():
+    return await send_tactical_push(
+        title="🛡️ NASONNATION // COMMAND TEST",
+        message="Tactical Push Alert link verified from node BOSSMAN (192.168.1.27).",
+        priority="high",
+        tags="white_check_mark,shield",
+    )
+
+
 @app.get("/api/faces")
-async def list_enrolled_faces():
+async def list_enrolled_faces(include_auto: bool = False):
     items = await face_engine.sync_gallery_from_db_and_disk()
-    # Keep background auto-scraped mugshot vectors hidden from UI cards unless they have been sighted (>0)
     visible = [
         {
             "id": f["id"],
             "name": f["name"],
             "role": "watchlist" if f["role"] == "watchlist_auto" else f["role"],
+            "raw_role": f["role"],
             "sample_crop": f["sample_crop"] if str(f["sample_crop"] or "").startswith("/") else None,
             "sightings": f["sightings"],
             "last_seen": f["last_seen"],
             "created_at": f["created_at"],
         }
         for f in items
-        if f["role"] != "watchlist_auto" or f.get("sightings", 0) > 0
+        if include_auto or f["role"] != "watchlist_auto" or int(f.get("sightings") or 0) > 0
     ]
     return visible
 
@@ -182,7 +232,7 @@ async def get_watchlist_status():
 
 @app.post("/api/faces/sync_watchlist")
 async def trigger_watchlist_sync():
-    return await sync_public_mugshot_feeds()
+    return await sync_public_mugshot_feeds(max_new_per_pass=65)
 
 
 @app.patch("/api/faces/{face_id}")
@@ -402,6 +452,30 @@ async def clear_camera_zones(camera_id: str):
     return await sync_zones_to_engine(app.state.cv_engine)
 
 
+@app.get("/api/detections/heatmap/{camera_id}")
+async def get_camera_heatmap(camera_id: str):
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(DetectionEvent)
+            .where(DetectionEvent.camera_id == camera_id, DetectionEvent.timestamp >= cutoff)
+            .limit(500)
+        )
+        rows = result.scalars().all()
+        points = []
+        for r in rows:
+            cx = round(r.bbox_x + r.bbox_w * 0.5, 4)
+            # Foot/ground contact point for persons & animals, center for vehicles
+            cy = round(r.bbox_y + (r.bbox_h * 0.88 if r.category in ("person", "animal") else r.bbox_h * 0.5), 4)
+            points.append({
+                "x": cx,
+                "y": cy,
+                "category": r.category,
+                "breach": "BREACH" in (r.full_label or ""),
+            })
+        return {"camera_id": camera_id, "count": len(points), "points": points}
+
+
 @app.get("/api/detections")
 async def get_recent_detections(limit: int = 35):
     async with AsyncSessionLocal() as session:
@@ -409,8 +483,14 @@ async def get_recent_detections(limit: int = 35):
             select(DetectionEvent).order_by(DetectionEvent.timestamp.desc()).limit(limit)
         )
         rows = result.scalars().all()
-        return [
-            {
+        out = []
+        for r in rows:
+            clip_exists = (
+                r.attributes
+                and r.category in ("person", "animal")
+                and os.path.exists(f"{SNAPSHOT_DIR}/clip_{r.attributes}.mp4")
+            )
+            out.append({
                 "id": r.id,
                 "timestamp": r.timestamp.isoformat(),
                 "camera_id": r.camera_id,
@@ -424,19 +504,20 @@ async def get_recent_detections(limit: int = 35):
                 "bbox_h": r.bbox_h,
                 "crop_url": f"/snapshots/crop_{r.attributes}" if r.attributes else None,
                 "full_url": f"/snapshots/full_{r.attributes}" if r.attributes else None,
+                "clip_url": f"/snapshots/clip_{r.attributes}.mp4" if clip_exists else None,
                 "ai_notes": r.ai_notes,
-            }
-            for r in rows
-        ]
+            })
+        return out
 
 
 @app.delete("/api/detections")
 async def purge_all_detections():
-    for f in glob.glob(f"{SNAPSHOT_DIR}/*.jpg"):
-        try:
-            os.remove(f)
-        except OSError:
-            pass
+    for ext in ("*.jpg", "*.mp4"):
+        for f in glob.glob(f"{SNAPSHOT_DIR}/{ext}"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
         await session.commit()

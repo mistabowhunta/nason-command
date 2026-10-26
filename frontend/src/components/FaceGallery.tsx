@@ -10,6 +10,7 @@ import {
   Globe,
   Lock,
   Plus,
+  RefreshCw,
   ShieldCheck,
   Trash2,
   Upload,
@@ -43,6 +44,9 @@ const ROLE_STYLES: Record<string, { label: string; badge: string; border: string
 export function FaceGallery({ hostIp }: FaceGalleryProps) {
   const apiBase = `http://${hostIp}:8080`;
   const [faces, setFaces] = useState<KnownFaceItem[]>([]);
+  const [autoWatchlistCount, setAutoWatchlistCount] = useState<number>(0);
+  const [showBgWatchlist, setShowBgWatchlist] = useState<boolean>(false);
+  const [syncingWatchlist, setSyncingWatchlist] = useState<boolean>(false);
   const [filterRole, setFilterRole] = useState<'all' | 'whitelist' | 'visitor' | 'watchlist'>('all');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editName, setEditName] = useState<string>('');
@@ -56,10 +60,14 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
 
   const fetchFaces = async () => {
     try {
-      const res = await fetch(`${apiBase}/api/faces`);
-      if (res.ok) {
-        const data: KnownFaceItem[] = await res.json();
-        setFaces(data);
+      const [res, statusRes] = await Promise.all([
+        fetch(`${apiBase}/api/faces?include_auto=${showBgWatchlist}`),
+        fetch(`${apiBase}/api/faces/watchlist_status`),
+      ]);
+      if (res.ok) setFaces(await res.json());
+      if (statusRes.ok) {
+        const st = await statusRes.json();
+        setAutoWatchlistCount(st.auto_watchlist_vectors || 0);
       }
     } catch (err) {
       console.error('Failed to fetch face gallery:', err);
@@ -70,7 +78,17 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
     fetchFaces();
     const timer = window.setInterval(fetchFaces, 5000);
     return () => window.clearInterval(timer);
-  }, [apiBase]);
+  }, [apiBase, showBgWatchlist]);
+
+  const handleSyncWatchlistNow = async () => {
+    setSyncingWatchlist(true);
+    try {
+      await fetch(`${apiBase}/api/faces/sync_watchlist`, { method: 'POST' });
+      await fetchFaces();
+    } finally {
+      setSyncingWatchlist(false);
+    }
+  };
 
   const handleSaveEdit = async (id: number) => {
     if (!editName.trim()) return;
@@ -128,7 +146,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
         } else {
           setImportStatus(data.detail || 'No clear face found in photo.');
         }
-      } catch (err) {
+      } catch {
         setImportStatus('Upload failed.');
       }
     };
@@ -158,7 +176,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
       } else {
         setImportStatus(data.detail || 'Could not extract face from URL.');
       }
-    } catch (err) {
+    } catch {
       setImportStatus('Failed to scrape image URL.');
     }
   };
@@ -195,24 +213,35 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
           <Users className="w-5 h-5 text-emerald-400" />
           <div>
             <h2 className="text-xs sm:text-sm font-bold text-zinc-100 uppercase">
-              YUNET + SFACE BIOMETRIC GALLERY ({faces.length} VECTORS)
+              YUNET + SFACE BIOMETRIC GALLERY ({faces.length} ACTIVE · {autoWatchlistCount} BG WATCHLIST)
             </h2>
             <p className="text-[10px] text-zinc-400">
-              Persistent 128-D vectors survive Kill-Feed PURGE · OpSec Lock active on Whitelist OSINT
+              Background FBI/DOC vectors stay hidden (0 sightings) until matched on camera
             </p>
           </div>
         </div>
 
-        <button
-          onClick={() => {
-            setShowImportDrawer((prev) => !prev);
-            setImportStatus(null);
-          }}
-          className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          + ENROLL PHOTO / WATCHLIST URL
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={handleSyncWatchlistNow}
+            disabled={syncingWatchlist}
+            className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-700 text-amber-300 px-2.5 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingWatchlist ? 'animate-spin' : ''}`} />
+            {syncingWatchlist ? 'SYNCING FBI/DOC...' : `SYNC WATCHLIST (${autoWatchlistCount})`}
+          </button>
+
+          <button
+            onClick={() => {
+              setShowImportDrawer((prev) => !prev);
+              setImportStatus(null);
+            }}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            + ENROLL PHOTO / URL
+          </button>
+        </div>
       </div>
 
       {showImportDrawer && (
@@ -299,30 +328,45 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        {[
-          { key: 'all', label: `ALL VECTORS (${counts.all})` },
-          { key: 'whitelist', label: `🛡️ WHITELIST (${counts.whitelist})` },
-          { key: 'visitor', label: `👤 REPEAT VISITORS (${counts.visitor})` },
-          { key: 'watchlist', label: `🚨 WATCHLIST (${counts.watchlist})` },
-        ].map((tab) => (
-          <button
-            key={tab.key}
-            onClick={() => setFilterRole(tab.key as 'all' | 'whitelist' | 'visitor' | 'watchlist')}
-            className={`px-3 py-1.5 rounded text-xs font-bold border cursor-pointer transition-colors ${
-              filterRole === tab.key
-                ? 'bg-emerald-600 text-white border-emerald-400'
-                : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-800'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {[
+            { key: 'all', label: `ALL ACTIVE (${counts.all})` },
+            { key: 'whitelist', label: `🛡️ WHITELIST (${counts.whitelist})` },
+            { key: 'visitor', label: `👤 REPEAT VISITORS (${counts.visitor})` },
+            { key: 'watchlist', label: `🚨 WATCHLIST (${counts.watchlist})` },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setFilterRole(tab.key as 'all' | 'whitelist' | 'visitor' | 'watchlist')}
+              className={`px-3 py-1.5 rounded text-xs font-bold border cursor-pointer transition-colors ${
+                filterRole === tab.key
+                  ? 'bg-emerald-600 text-white border-emerald-400'
+                  : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-800'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={() => setShowBgWatchlist((prev) => !prev)}
+          className={`px-2.5 py-1 rounded text-[11px] font-bold border cursor-pointer ${
+            showBgWatchlist
+              ? 'bg-red-950 text-red-300 border-red-500/50'
+              : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+          }`}
+        >
+          {showBgWatchlist
+            ? `HIDE BG FBI/DOC VECTORS (${autoWatchlistCount})`
+            : `SHOW BG FBI/DOC VECTORS (${autoWatchlistCount} HIDDEN)`}
+        </button>
       </div>
 
       {filteredFaces.length === 0 ? (
         <div className="bg-zinc-900/40 border border-zinc-800 rounded-lg py-16 text-center text-xs text-zinc-500">
-          No face vectors in this category yet. Click [ID FACE] on any Kill-Feed card or use [+ ENROLL PHOTO / WATCHLIST URL] above.
+          No active face vectors in this view. ({autoWatchlistCount} background FBI/DOC vectors are armed in RAM with 0 sightings).
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
@@ -336,7 +380,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
                   hour: '2-digit',
                   minute: '2-digit',
                 })
-              : 'Unknown';
+              : 'Never';
 
             return (
               <div
@@ -418,7 +462,6 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
                   </div>
                 ) : (
                   <div className="space-y-2 pt-2 border-t border-zinc-900">
-                    {/* Layer 3: OSINT Bar (Greyed out when role === 'whitelist') */}
                     <div className="flex items-center justify-between gap-1">
                       {face.sample_crop && (
                         <a

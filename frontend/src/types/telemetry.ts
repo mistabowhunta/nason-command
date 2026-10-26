@@ -38,10 +38,18 @@ export interface KnownFaceItem {
   id: number;
   name: string;
   role: 'whitelist' | 'visitor' | 'watchlist';
+  raw_role?: string;
   sample_crop: string | null;
   sightings: number;
   last_seen: string | null;
   created_at: string | null;
+}
+
+export interface HeatmapPoint {
+  x: number;
+  y: number;
+  category: string;
+  breach: boolean;
 }
 
 export interface PersistedDetectionEvent {
@@ -58,6 +66,7 @@ export interface PersistedDetectionEvent {
   bbox_h: number;
   crop_url: string | null;
   full_url: string | null;
+  clip_url?: string | null;
   ai_notes?: string | null;
 }
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useWhepClient } from '../hooks/useWhepClient';
-import type { BoundingBoxDetection, CameraScheduleConfig, CameraZone, ZonePoint } from '../types/telemetry';
-import { Check, Clock, Crosshair, Database, Eye, EyeOff, Maximize2, Minimize2, PauseCircle, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
+import type { BoundingBoxDetection, CameraScheduleConfig, CameraZone, HeatmapPoint, ZonePoint } from '../types/telemetry';
+import { Check, Clock, Crosshair, Database, Eye, EyeOff, Flame, Maximize2, Minimize2, PauseCircle, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
 
 interface VideoTileProps {
   title: string;
@@ -72,6 +72,8 @@ export function VideoTile({
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [autoLock, setAutoLock] = useState<boolean>(false);
   const [showBbox, setShowBbox] = useState<boolean>(true);
+  const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
+  const [heatmapPoints, setHeatmapPoints] = useState<HeatmapPoint[]>([]);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
@@ -79,7 +81,6 @@ export function VideoTile({
   const [draftPoints, setDraftPoints] = useState<ZonePoint[]>([]);
   const canvasWrapRef = useRef<HTMLDivElement | null>(null);
 
-  // Schedule Modal State
   const [showSchedModal, setShowSchedModal] = useState<boolean>(false);
   const [schedMode, setSchedMode] = useState<'always_record' | 'paused' | 'schedule'>('always_record');
   const [schedStart, setSchedStart] = useState<string>('21:00');
@@ -92,6 +93,24 @@ export function VideoTile({
       setSchedEnd(schedule.end_time || '06:00');
     }
   }, [schedule]);
+
+  useEffect(() => {
+    if (!showHeatmap) return;
+    const fetchHeat = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/detections/heatmap/${streamName}`);
+        if (res.ok) {
+          const data = await res.json();
+          setHeatmapPoints(data.points || []);
+        }
+      } catch (err) {
+        console.error('Failed to load heatmap:', err);
+      }
+    };
+    fetchHeat();
+    const timer = window.setInterval(fetchHeat, 8000);
+    return () => window.clearInterval(timer);
+  }, [showHeatmap, apiBase, streamName]);
 
   const hasBreach = detections.some((d) => d.breach);
   const isRecordingNow = schedule ? schedule.currently_recording : true;
@@ -307,6 +326,35 @@ export function VideoTile({
           preserveAspectRatio="none"
           className="absolute inset-0 w-full h-full pointer-events-none"
         >
+          <defs>
+            <radialGradient id={`heatGradRed-${streamName}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#ef4444" stopOpacity="0.65" />
+              <stop offset="45%" stopColor="#f59e0b" stopOpacity="0.35" />
+              <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
+            </radialGradient>
+            <radialGradient id={`heatGradSky-${streamName}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.55" />
+              <stop offset="50%" stopColor="#10b981" stopOpacity="0.25" />
+              <stop offset="100%" stopColor="#000000" stopOpacity="0" />
+            </radialGradient>
+          </defs>
+
+          {/* 24-Hour Tactical Thermal Heatmap Overlay */}
+          {showHeatmap &&
+            heatmapPoints.map((pt, idx) => (
+              <circle
+                key={idx}
+                cx={pt.x * 1000}
+                cy={pt.y * 1000}
+                r={pt.category === 'person' || pt.breach ? 68 : 52}
+                fill={
+                  pt.category === 'person' || pt.breach
+                    ? `url(#heatGradRed-${streamName})`
+                    : `url(#heatGradSky-${streamName})`
+                }
+              />
+            ))}
+
           {zones.map((z) => {
             const pts = z.points.map((p) => `${p.x * 1000},${p.y * 1000}`).join(' ');
             const isExcl = z.zone_type === 'exclusion';
@@ -422,7 +470,7 @@ export function VideoTile({
                       det.breach ? 'bg-red-600 text-white border-red-300' : theme.badge
                     }`}
                   >
-                    {shortSlot} // {det.category.toUpperCase()} {det.breach ? '⚠️ BREACH' : `· ${pctConf}%`}
+                    {shortSlot} // {det.sub_type.toUpperCase()} {det.breach ? '⚠️ BREACH' : `· ${pctConf}%`}
                   </span>
                 </div>
               );
@@ -444,6 +492,11 @@ export function VideoTile({
           {hasBreach && (
             <span className="bg-red-600 text-white px-2 py-0.5 rounded text-[10px] font-mono font-bold animate-bounce">
               🚨 BREACH
+            </span>
+          )}
+          {showHeatmap && (
+            <span className="bg-orange-600/90 text-white px-1.5 py-0.5 rounded text-[10px] font-mono font-bold">
+              🔥 24H HEAT ({heatmapPoints.length})
             </span>
           )}
           {zoom > 1 && (
@@ -503,6 +556,19 @@ export function VideoTile({
                     ? 'REC'
                     : 'PAUSED'}
                 </span>
+              </button>
+
+              <button
+                onClick={() => setShowHeatmap((prev) => !prev)}
+                title="Toggle 24-Hour Tactical Thermal Heatmap Overlay"
+                className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer ${
+                  showHeatmap
+                    ? 'bg-orange-600 text-white border-orange-400'
+                    : 'bg-zinc-950/85 hover:bg-zinc-800 text-orange-300 border-zinc-800'
+                }`}
+              >
+                <Flame className="w-3 h-3" />
+                <span className="hidden sm:inline">HEAT</span>
               </button>
 
               <button
@@ -591,7 +657,6 @@ export function VideoTile({
         </div>
       </div>
 
-      {/* Per-Camera Recording Schedule Popover */}
       {showSchedModal && (
         <div
           onClick={(e) => e.stopPropagation()}

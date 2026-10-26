@@ -9,6 +9,8 @@ import {
   Download,
   ExternalLink,
   Eye,
+  Film,
+  Image as ImageIcon,
   Lock,
   Sparkles,
   Trash2,
@@ -37,6 +39,7 @@ const BADGE_COLORS: Record<string, string> = {
 export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = false }: EvidenceRailProps) {
   const [events, setEvents] = useState<PersistedDetectionEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<PersistedDetectionEvent | null>(null);
+  const [viewMode, setViewMode] = useState<'clip' | 'still'>('clip');
   const [showSnapshotBbox, setShowSnapshotBbox] = useState<boolean>(true);
   const [inspectingId, setInspectingId] = useState<number | null>(null);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
@@ -108,7 +111,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
       } else {
         setEnrollStatus(data.detail || 'Could not isolate face in this crop.');
       }
-    } catch (err) {
+    } catch {
       setEnrollStatus('Failed to reach Face Engine.');
     }
   };
@@ -195,7 +198,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
           {events.length > 0 && (
             <button
               onClick={handlePurgeAll}
-              title="Wipe snapshots & detection logs (Face IDs are preserved)"
+              title="Wipe snapshots & clips (Face IDs are preserved)"
               className="text-[10px] font-mono bg-red-950/80 hover:bg-red-900 text-red-300 border border-red-500/40 px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer"
             >
               <Trash2 className="w-3 h-3" />
@@ -230,7 +233,10 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
               return (
                 <div
                   key={ev.id}
-                  onClick={() => setSelectedEvent(ev)}
+                  onClick={() => {
+                    setSelectedEvent(ev);
+                    setViewMode(ev.clip_url ? 'clip' : 'still');
+                  }}
                   className={`group rounded p-2 flex flex-col gap-2 cursor-pointer transition-all border ${
                     isBreach
                       ? 'bg-red-950/35 hover:bg-red-950/50 border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.25)]'
@@ -247,7 +253,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                   )}
 
                   <div className="flex gap-3 items-center">
-                    <div className="w-16 h-14 bg-zinc-900 rounded overflow-hidden shrink-0 border border-zinc-800 flex items-center justify-center">
+                    <div className="relative w-16 h-14 bg-zinc-900 rounded overflow-hidden shrink-0 border border-zinc-800 flex items-center justify-center">
                       {ev.crop_url ? (
                         <img
                           src={`${apiBase}${ev.crop_url}`}
@@ -257,14 +263,20 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                       ) : (
                         <Camera className="w-5 h-5 text-zinc-700" />
                       )}
+                      {ev.clip_url && (
+                        <span className="absolute bottom-0.5 right-0.5 bg-emerald-600/95 text-white text-[8px] font-mono font-bold px-1 rounded-xs flex items-center gap-0.5">
+                          <Film className="w-2.5 h-2.5" />
+                          5s
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex-1 min-w-0 font-mono">
                       <div className="flex items-center justify-between gap-1">
-                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase ${badge}`}>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border uppercase truncate ${badge}`}>
                           {ev.sub_type || ev.category} · {Math.round(ev.confidence * 100)}%
                         </span>
-                        <span className="text-[10px] text-zinc-400 flex items-center gap-1">
+                        <span className="text-[10px] text-zinc-400 flex items-center gap-1 shrink-0">
                           <Clock className="w-2.5 h-2.5" />
                           {timeStr}
                         </span>
@@ -402,13 +414,26 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
             <div className="px-3 sm:px-4 py-3 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-2 font-mono">
               <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
                 <span className="text-xs font-bold text-emerald-400 uppercase">
-                  SNAPSHOT #{selectedEvent.id}
+                  EVENT #{selectedEvent.id}
                 </span>
                 <span className="text-xs text-zinc-200 font-bold">
                   {CAM_NAMES[selectedEvent.camera_id] || selectedEvent.camera_id} // {selectedEvent.full_label}
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
+                {selectedEvent.clip_url && (
+                  <button
+                    onClick={() => setViewMode(viewMode === 'clip' ? 'still' : 'clip')}
+                    className={`px-2 py-1 rounded text-[11px] font-mono font-bold border flex items-center gap-1 cursor-pointer ${
+                      viewMode === 'clip'
+                        ? 'bg-emerald-600 text-white border-emerald-400'
+                        : 'bg-zinc-900 text-emerald-300 border-zinc-700'
+                    }`}
+                  >
+                    {viewMode === 'clip' ? <ImageIcon className="w-3 h-3" /> : <Film className="w-3 h-3" />}
+                    {viewMode === 'clip' ? 'VIEW STILL + BBOX' : '🎬 5s MP4 REPLAY'}
+                  </button>
+                )}
                 {selectedEvent.crop_url && (
                   <a
                     href={`${apiBase}${selectedEvent.crop_url}`}
@@ -447,17 +472,19 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                   YANDEX
                   {!isSelectedWhitelisted && <ExternalLink className="w-3 h-3" />}
                 </button>
-                <button
-                  onClick={() => setShowSnapshotBbox((prev) => !prev)}
-                  className={`px-2 py-1 rounded text-[11px] font-mono font-bold border flex items-center gap-1 cursor-pointer ${
-                    showSnapshotBbox
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
-                      : 'bg-zinc-900 text-zinc-400 border-zinc-700'
-                  }`}
-                >
-                  <Crosshair className="w-3 h-3" />
-                  {showSnapshotBbox ? 'BBOX: ON' : 'BBOX: OFF'}
-                </button>
+                {viewMode === 'still' && (
+                  <button
+                    onClick={() => setShowSnapshotBbox((prev) => !prev)}
+                    className={`px-2 py-1 rounded text-[11px] font-mono font-bold border flex items-center gap-1 cursor-pointer ${
+                      showSnapshotBbox
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                        : 'bg-zinc-900 text-zinc-400 border-zinc-700'
+                    }`}
+                  >
+                    <Crosshair className="w-3 h-3" />
+                    {showSnapshotBbox ? 'BBOX: ON' : 'BBOX: OFF'}
+                  </button>
+                )}
                 <button
                   onClick={(e) => handleDeepInspect(e, selectedEvent.id)}
                   disabled={inspectingId === selectedEvent.id}
@@ -482,7 +509,16 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
             )}
 
             <div className="bg-black aspect-video relative flex items-center justify-center overflow-hidden">
-              {selectedEvent.full_url ? (
+              {viewMode === 'clip' && selectedEvent.clip_url ? (
+                <video
+                  src={`${apiBase}${selectedEvent.clip_url}`}
+                  controls
+                  autoPlay
+                  loop
+                  playsInline
+                  className="w-full h-full object-contain"
+                />
+              ) : selectedEvent.full_url ? (
                 <>
                   <img
                     src={`${apiBase}${selectedEvent.full_url}`}

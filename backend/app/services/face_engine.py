@@ -275,7 +275,7 @@ class BiometricFaceEngine:
                         "role": r.role or "whitelist",
                         "vec": arr,
                         "sample_crop": r.sample_crop,
-                        "sightings": r.sightings or 1,
+                        "sightings": r.sightings if r.sightings is not None else 0,
                         "last_seen": r.last_seen.isoformat() if r.last_seen else None,
                         "created_at": r.created_at.isoformat() if r.created_at else None,
                     })

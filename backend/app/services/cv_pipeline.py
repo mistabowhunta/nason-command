@@ -2,6 +2,7 @@ import asyncio
 from collections import deque
 import math
 import os
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone
@@ -154,10 +155,16 @@ class ParkedVehicleRegistry:
 
 
 class LatestFrameGrabber:
+    """
+    Grabs real-time RTSP frames AND maintains a rolling 8-FPS pre-event ring buffer
+    so 5-second MP4 Instant Replay clips can be encoded for Person and Animal events.
+    """
     def __init__(self, rtsp_url: str):
         self.rtsp_url = rtsp_url
         self.frame: np.ndarray | None = None
         self.frame_time: float = 0.0
+        self.clip_buffer: deque[tuple[float, np.ndarray]] = deque(maxlen=48)
+        self.last_buf_time: float = 0.0
         self.lock = threading.Lock()
         self.running = True
         self.thread = threading.Thread(target=self._reader, daemon=True)
@@ -176,9 +183,15 @@ class LatestFrameGrabber:
                 ret, frm = cap.read()
                 if not ret or frm is None or frm.size == 0:
                     break
+                now = time.time()
                 with self.lock:
                     self.frame = frm
-                    self.frame_time = time.time()
+                    self.frame_time = now
+                    # Sample into ring buffer at ~8 FPS (960x540) for smooth 5-second replays
+                    if now - self.last_buf_time >= 0.125:
+                        self.last_buf_time = now
+                        clip_frm = cv2.resize(frm, (960, 540))
+                        self.clip_buffer.append((now, clip_frm))
 
             cap.release()
             time.sleep(1.0)
@@ -189,8 +202,59 @@ class LatestFrameGrabber:
                 return None, 0.0
             return self.frame.copy(), self.frame_time
 
+    def get_recent_clip_frames(self, since_ts: float) -> list[tuple[float, np.ndarray]]:
+        with self.lock:
+            return [(t, f.copy()) for t, f in self.clip_buffer if t >= since_ts]
+
     def stop(self):
         self.running = False
+
+
+def encode_mp4_replay_async(grabber: LatestFrameGrabber, snap_id: str, trigger_ts: float):
+    """
+    Waits 2.4s to gather post-trigger frames, combines with 2.6s of pre-trigger frames
+    (total 5.0 seconds), and encodes an H.264 MP4 clip for instant browser playback.
+    """
+    def _worker():
+        time.sleep(2.4)
+        frames_with_ts = grabber.get_recent_clip_frames(trigger_ts - 2.6)
+        if len(frames_with_ts) < 6:
+            return
+
+        out_mp4 = f"{SNAPSHOT_DIR}/clip_{snap_id}.mp4"
+        h, w = frames_with_ts[0][1].shape[:2]
+        duration = max(1.0, frames_with_ts[-1][0] - frames_with_ts[0][0])
+        fps = max(6.0, min(12.0, len(frames_with_ts) / duration))
+
+        try:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-loglevel", "error",
+                "-f", "rawvideo",
+                "-vcodec", "rawvideo",
+                "-s", f"{w}x{h}",
+                "-pix_fmt", "bgr24",
+                "-r", f"{fps:.2f}",
+                "-i", "-",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "26",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                out_mp4,
+            ]
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            for _, frm in frames_with_ts:
+                if proc.stdin:
+                    proc.stdin.write(frm.tobytes())
+            if proc.stdin:
+                proc.stdin.close()
+            proc.wait(timeout=15)
+        except Exception as e:
+            print(f"[MP4 REPLAY ERROR] {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 class TrueDisplacementTracker:
@@ -345,7 +409,6 @@ class TrueDisplacementTracker:
             recognized_role = tr.get("face_role")
             recognized_sightings = tr.get("face_sightings", 1)
 
-            # Watchlist faces ALWAYS trigger an immediate breach alert!
             is_breach = recognized_role in ("watchlist", "watchlist_auto")
             if not is_breach:
                 for z in cam_zones:
@@ -543,9 +606,10 @@ class EdgeCVEngine:
                 })
         return results
 
-    def _save_snapshots(self, stream_name: str, frame: np.ndarray, db_events: list[dict]):
+    def _save_snapshots_and_clips(self, stream_name: str, grabber: LatestFrameGrabber, frame: np.ndarray, db_events: list[dict]):
         fh, fw, _ = frame.shape
-        ts_ms = int(time.time() * 1000)
+        now_ts = time.time()
+        ts_ms = int(now_ts * 1000)
         for ev in db_events:
             snap_id = f"{stream_name}_{ts_ms}_{ev['slot']}.jpg"
             pad_x = ev["w"] * 0.18
@@ -560,6 +624,10 @@ class EdgeCVEngine:
                 cv2.imwrite(f"{SNAPSHOT_DIR}/crop_{snap_id}", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
             cv2.imwrite(f"{SNAPSHOT_DIR}/full_{snap_id}", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84])
             ev["attributes"] = snap_id
+
+            # Record 5-Second H.264 MP4 Instant Replay ONLY for person & animal targets!
+            if ev["category"] in ("person", "animal"):
+                encode_mp4_replay_async(grabber, snap_id, now_ts)
 
     def _worker(self, stream_name: str):
         rtsp_url = f"{RTSP_BASE}/{stream_name}"
@@ -618,7 +686,7 @@ class EdgeCVEngine:
             self.latest_detections[stream_name] = active_out
 
             if db_events and self.is_camera_recording(stream_name):
-                self._save_snapshots(stream_name, frame, db_events)
+                self._save_snapshots_and_clips(stream_name, grabber, frame, db_events)
                 asyncio.run_coroutine_threadsafe(
                     self.event_queue.put((stream_name, db_events)), self.loop
                 )
