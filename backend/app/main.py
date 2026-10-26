@@ -455,17 +455,15 @@ async def clear_camera_zones(camera_id: str):
 @app.get("/api/detections/heatmap/{camera_id}")
 async def get_camera_heatmap(camera_id: str):
     cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    points = []
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(DetectionEvent)
             .where(DetectionEvent.camera_id == camera_id, DetectionEvent.timestamp >= cutoff)
-            .limit(500)
+            .limit(400)
         )
-        rows = result.scalars().all()
-        points = []
-        for r in rows:
+        for r in result.scalars().all():
             cx = round(r.bbox_x + r.bbox_w * 0.5, 4)
-            # Foot/ground contact point for persons & animals, center for vehicles
             cy = round(r.bbox_y + (r.bbox_h * 0.88 if r.category in ("person", "animal") else r.bbox_h * 0.5), 4)
             points.append({
                 "x": cx,
@@ -473,7 +471,21 @@ async def get_camera_heatmap(camera_id: str):
                 "category": r.category,
                 "breach": "BREACH" in (r.full_label or ""),
             })
-        return {"camera_id": camera_id, "count": len(points), "points": points}
+
+    # Merge continuous 0.55s footstep & standing dwell traces from RAM
+    cv_engine = getattr(app.state, "cv_engine", None)
+    if cv_engine and hasattr(cv_engine, "heatmap_traces"):
+        now_ts = time.time()
+        for pt in list(cv_engine.heatmap_traces.get(camera_id, [])):
+            if now_ts - pt.get("ts", now_ts) <= 86400:
+                points.append({
+                    "x": pt["x"],
+                    "y": pt["y"],
+                    "category": pt["category"],
+                    "breach": pt.get("breach", False),
+                })
+
+    return {"camera_id": camera_id, "count": len(points), "points": points[-1200:]}
 
 
 @app.get("/api/detections")
@@ -519,7 +531,11 @@ async def purge_all_detections():
             except OSError:
                 pass
     async with AsyncSessionLocal() as session:
-        await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
+        cv_engine = getattr(app.state, "cv_engine", None)
+    if cv_engine and hasattr(cv_engine, "heatmap_traces"):
+        for k in cv_engine.heatmap_traces:
+            cv_engine.heatmap_traces[k].clear()
+    await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
         await session.commit()
     return {"status": "PURGED"}
 

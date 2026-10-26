@@ -328,8 +328,8 @@ export function VideoTile({
         >
           <defs>
             <radialGradient id={`heatGradRed-${streamName}`} cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor="#ef4444" stopOpacity="0.65" />
-              <stop offset="45%" stopColor="#f59e0b" stopOpacity="0.35" />
+              <stop offset="0%" stopColor="#ef4444" stopOpacity="0.32" />
+              <stop offset="45%" stopColor="#f59e0b" stopOpacity="0.16" />
               <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
             </radialGradient>
             <radialGradient id={`heatGradSky-${streamName}`} cx="50%" cy="50%" r="50%">
@@ -339,21 +339,25 @@ export function VideoTile({
             </radialGradient>
           </defs>
 
-          {/* 24-Hour Tactical Thermal Heatmap Overlay */}
-          {showHeatmap &&
-            heatmapPoints.map((pt, idx) => (
-              <circle
-                key={idx}
-                cx={pt.x * 1000}
-                cy={pt.y * 1000}
-                r={pt.category === 'person' || pt.breach ? 68 : 52}
-                fill={
-                  pt.category === 'person' || pt.breach
-                    ? `url(#heatGradRed-${streamName})`
-                    : `url(#heatGradSky-${streamName})`
-                }
-              />
-            ))}
+          {/* 24-Hour Tactical Thermal Heatmap Overlay (True 16:9 Circular Plumes) */}
+          {showHeatmap && (
+            <g style={{ mixBlendMode: 'screen' }}>
+              {heatmapPoints.map((pt, idx) => (
+                <ellipse
+                  key={idx}
+                  cx={pt.x * 1000}
+                  cy={pt.y * 1000}
+                  rx={pt.category === 'person' || pt.breach ? 24 : 20}
+                  ry={pt.category === 'person' || pt.breach ? 42 : 35}
+                  fill={
+                    pt.category === 'person' || pt.breach
+                      ? `url(#heatGradRed-${streamName})`
+                      : `url(#heatGradSky-${streamName})`
+                  }
+                />
+              ))}
+            </g>
+          )}
 
           {zones.map((z) => {
             const pts = z.points.map((p) => `${p.x * 1000},${p.y * 1000}`).join(' ');

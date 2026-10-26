@@ -478,6 +478,8 @@ class EdgeCVEngine:
         self.loop = loop
         self.running = True
         self.latest_detections: dict[str, list[dict]] = {s: [] for s in streams}
+        self.heatmap_traces: dict[str, deque] = {s: deque(maxlen=1500) for s in streams}
+        self.last_heat_sample: dict[str, float] = {s: 0.0 for s in streams}
         self.zones: dict[str, list[dict]] = {s: [] for s in streams}
         self.schedules: dict[str, dict] = {
             s: {"camera_id": s, "mode": "always_record", "start_time": "21:00", "end_time": "06:00"}
@@ -683,6 +685,26 @@ class EdgeCVEngine:
             candidate_detections.sort(key=lambda d: d["area"], reverse=True)
 
             active_out, db_events = tracker.update(frame, candidate_detections, motion_boxes, cam_zones)
+            now_heat = time.time()
+            if now_heat - self.last_heat_sample.get(stream_name, 0.0) >= 0.55:
+                # Sample both active moving tracks AND stationary persons standing in view
+                sampled_any = False
+                for det in candidate_detections:
+                    if det.get("is_parked_vehicle"):
+                        continue
+                    if det["category"] in ("person", "animal") or any(a["slot"] for a in active_out if a["category"] == "vehicle"):
+                        hx = round(det["x"] + det["w"] * 0.5, 4)
+                        hy = round(det["y"] + (det["h"] * 0.88 if det["category"] in ("person", "animal") else det["h"] * 0.5), 4)
+                        self.heatmap_traces[stream_name].append({
+                            "x": hx,
+                            "y": hy,
+                            "category": det["category"],
+                            "breach": False,
+                            "ts": now_heat,
+                        })
+                        sampled_any = True
+                if sampled_any:
+                    self.last_heat_sample[stream_name] = now_heat
             self.latest_detections[stream_name] = active_out
 
             if db_events and self.is_camera_recording(stream_name):

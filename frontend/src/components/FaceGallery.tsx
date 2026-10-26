@@ -3,6 +3,8 @@ import type { KnownFaceItem } from '../types/telemetry';
 import {
   AlertTriangle,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Download,
   Edit3,
@@ -22,6 +24,8 @@ import {
 interface FaceGalleryProps {
   hostIp: string;
 }
+
+const PAGE_SIZE = 12;
 
 const ROLE_STYLES: Record<string, { label: string; badge: string; border: string }> = {
   whitelist: {
@@ -47,7 +51,9 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
   const [autoWatchlistCount, setAutoWatchlistCount] = useState<number>(0);
   const [showBgWatchlist, setShowBgWatchlist] = useState<boolean>(false);
   const [syncingWatchlist, setSyncingWatchlist] = useState<boolean>(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [filterRole, setFilterRole] = useState<'all' | 'whitelist' | 'visitor' | 'watchlist'>('all');
+  const [currentPage, setCurrentPage] = useState<number>(1);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editName, setEditName] = useState<string>('');
   const [editRole, setEditRole] = useState<'whitelist' | 'visitor' | 'watchlist'>('whitelist');
@@ -80,10 +86,19 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
     return () => window.clearInterval(timer);
   }, [apiBase, showBgWatchlist]);
 
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filterRole, showBgWatchlist]);
+
   const handleSyncWatchlistNow = async () => {
     setSyncingWatchlist(true);
+    setSyncMessage('Paginating FBI & Oregon DOC feeds...');
     try {
-      await fetch(`${apiBase}/api/faces/sync_watchlist`, { method: 'POST' });
+      const res = await fetch(`${apiBase}/api/faces/sync_watchlist`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setSyncMessage(`+${data.added} new fugitive vectors indexed (${data.total_auto} total in RAM)`);
+      }
       await fetchFaces();
     } finally {
       setSyncingWatchlist(false);
@@ -199,6 +214,10 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
   };
 
   const filteredFaces = faces.filter((f) => (filterRole === 'all' ? true : f.role === filterRole));
+  const totalPages = Math.max(1, Math.ceil(filteredFaces.length / PAGE_SIZE));
+  const safePage = Math.min(currentPage, totalPages);
+  const pagedFaces = filteredFaces.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
   const counts = {
     all: faces.length,
     whitelist: faces.filter((f) => f.role === 'whitelist').length,
@@ -213,10 +232,10 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
           <Users className="w-5 h-5 text-emerald-400" />
           <div>
             <h2 className="text-xs sm:text-sm font-bold text-zinc-100 uppercase">
-              YUNET + SFACE BIOMETRIC GALLERY ({faces.length} ACTIVE · {autoWatchlistCount} BG WATCHLIST)
+              YUNET + SFACE BIOMETRIC GALLERY ({faces.length} SHOWN · {autoWatchlistCount} BG WATCHLIST)
             </h2>
             <p className="text-[10px] text-zinc-400">
-              Background FBI/DOC vectors stay hidden (0 sightings) until matched on camera
+              {syncMessage || 'Click SYNC WATCHLIST to paginate through unseen FBI & Oregon DOC fugitive pages'}
             </p>
           </div>
         </div>
@@ -228,7 +247,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
             className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-700 text-amber-300 px-2.5 py-1.5 rounded text-xs font-bold flex items-center gap-1.5 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${syncingWatchlist ? 'animate-spin' : ''}`} />
-            {syncingWatchlist ? 'SYNCING FBI/DOC...' : `SYNC WATCHLIST (${autoWatchlistCount})`}
+            {syncingWatchlist ? 'SCRAPING NEXT PAGES...' : `SYNC NEXT FBI PAGES (${autoWatchlistCount})`}
           </button>
 
           <button
@@ -331,9 +350,9 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           {[
-            { key: 'all', label: `ALL ACTIVE (${counts.all})` },
+            { key: 'all', label: `ALL (${counts.all})` },
             { key: 'whitelist', label: `🛡️ WHITELIST (${counts.whitelist})` },
-            { key: 'visitor', label: `👤 REPEAT VISITORS (${counts.visitor})` },
+            { key: 'visitor', label: `👤 VISITORS (${counts.visitor})` },
             { key: 'watchlist', label: `🚨 WATCHLIST (${counts.watchlist})` },
           ].map((tab) => (
             <button
@@ -350,27 +369,51 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
           ))}
         </div>
 
-        <button
-          onClick={() => setShowBgWatchlist((prev) => !prev)}
-          className={`px-2.5 py-1 rounded text-[11px] font-bold border cursor-pointer ${
-            showBgWatchlist
-              ? 'bg-red-950 text-red-300 border-red-500/50'
-              : 'bg-zinc-900 text-zinc-400 border-zinc-800'
-          }`}
-        >
-          {showBgWatchlist
-            ? `HIDE BG FBI/DOC VECTORS (${autoWatchlistCount})`
-            : `SHOW BG FBI/DOC VECTORS (${autoWatchlistCount} HIDDEN)`}
-        </button>
+        <div className="flex items-center gap-2">
+          {totalPages > 1 && (
+            <div className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs">
+              <button
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                disabled={safePage <= 1}
+                className="disabled:opacity-30 text-zinc-200 hover:text-emerald-400 cursor-pointer"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="px-2 text-[11px] font-bold text-zinc-300">
+                PAGE {safePage} / {totalPages}
+              </span>
+              <button
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                disabled={safePage >= totalPages}
+                className="disabled:opacity-30 text-zinc-200 hover:text-emerald-400 cursor-pointer"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          <button
+            onClick={() => setShowBgWatchlist((prev) => !prev)}
+            className={`px-2.5 py-1.5 rounded text-[11px] font-bold border cursor-pointer ${
+              showBgWatchlist
+                ? 'bg-red-950 text-red-300 border-red-500/50'
+                : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+            }`}
+          >
+            {showBgWatchlist
+              ? `HIDE BG FBI/DOC (${autoWatchlistCount})`
+              : `SHOW BG FBI/DOC (${autoWatchlistCount} HIDDEN)`}
+          </button>
+        </div>
       </div>
 
-      {filteredFaces.length === 0 ? (
+      {pagedFaces.length === 0 ? (
         <div className="bg-zinc-900/40 border border-zinc-800 rounded-lg py-16 text-center text-xs text-zinc-500">
           No active face vectors in this view. ({autoWatchlistCount} background FBI/DOC vectors are armed in RAM with 0 sightings).
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {filteredFaces.map((face) => {
+          {pagedFaces.map((face) => {
             const style = ROLE_STYLES[face.role] || ROLE_STYLES.whitelist;
             const isWhitelisted = face.role === 'whitelist';
             const lastSeenStr = face.last_seen
