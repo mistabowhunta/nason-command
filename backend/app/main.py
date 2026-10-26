@@ -232,7 +232,7 @@ async def get_watchlist_status():
 
 @app.post("/api/faces/sync_watchlist")
 async def trigger_watchlist_sync():
-    return await sync_public_mugshot_feeds(max_new_per_pass=65)
+    return await sync_public_mugshot_feeds(max_new_per_pass=50)
 
 
 @app.patch("/api/faces/{face_id}")
@@ -472,7 +472,6 @@ async def get_camera_heatmap(camera_id: str):
                 "breach": "BREACH" in (r.full_label or ""),
             })
 
-    # Merge continuous 0.55s footstep & standing dwell traces from RAM
     cv_engine = getattr(app.state, "cv_engine", None)
     if cv_engine and hasattr(cv_engine, "heatmap_traces"):
         now_ts = time.time()
@@ -530,12 +529,12 @@ async def purge_all_detections():
                 os.remove(f)
             except OSError:
                 pass
-    async with AsyncSessionLocal() as session:
-        cv_engine = getattr(app.state, "cv_engine", None)
+    cv_engine = getattr(app.state, "cv_engine", None)
     if cv_engine and hasattr(cv_engine, "heatmap_traces"):
         for k in cv_engine.heatmap_traces:
             cv_engine.heatmap_traces[k].clear()
-    await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
         await session.commit()
     return {"status": "PURGED"}
 

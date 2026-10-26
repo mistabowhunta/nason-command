@@ -155,10 +155,6 @@ class ParkedVehicleRegistry:
 
 
 class LatestFrameGrabber:
-    """
-    Grabs real-time RTSP frames AND maintains a rolling 8-FPS pre-event ring buffer
-    so 5-second MP4 Instant Replay clips can be encoded for Person and Animal events.
-    """
     def __init__(self, rtsp_url: str):
         self.rtsp_url = rtsp_url
         self.frame: np.ndarray | None = None
@@ -187,7 +183,6 @@ class LatestFrameGrabber:
                 with self.lock:
                     self.frame = frm
                     self.frame_time = now
-                    # Sample into ring buffer at ~8 FPS (960x540) for smooth 5-second replays
                     if now - self.last_buf_time >= 0.125:
                         self.last_buf_time = now
                         clip_frm = cv2.resize(frm, (960, 540))
@@ -211,10 +206,6 @@ class LatestFrameGrabber:
 
 
 def encode_mp4_replay_async(grabber: LatestFrameGrabber, snap_id: str, trigger_ts: float):
-    """
-    Waits 2.4s to gather post-trigger frames, combines with 2.6s of pre-trigger frames
-    (total 5.0 seconds), and encodes an H.264 MP4 clip for instant browser playback.
-    """
     def _worker():
         time.sleep(2.4)
         frames_with_ts = grabber.get_recent_clip_frames(trigger_ts - 2.6)
@@ -627,7 +618,6 @@ class EdgeCVEngine:
             cv2.imwrite(f"{SNAPSHOT_DIR}/full_{snap_id}", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84])
             ev["attributes"] = snap_id
 
-            # Record 5-Second H.264 MP4 Instant Replay ONLY for person & animal targets!
             if ev["category"] in ("person", "animal"):
                 encode_mp4_replay_async(grabber, snap_id, now_ts)
 
@@ -687,7 +677,6 @@ class EdgeCVEngine:
             active_out, db_events = tracker.update(frame, candidate_detections, motion_boxes, cam_zones)
             now_heat = time.time()
             if now_heat - self.last_heat_sample.get(stream_name, 0.0) >= 0.55:
-                # Sample both active moving tracks AND stationary persons standing in view
                 sampled_any = False
                 for det in candidate_detections:
                     if det.get("is_parked_vehicle"):
@@ -705,6 +694,7 @@ class EdgeCVEngine:
                         sampled_any = True
                 if sampled_any:
                     self.last_heat_sample[stream_name] = now_heat
+
             self.latest_detections[stream_name] = active_out
 
             if db_events and self.is_camera_recording(stream_name):
