@@ -1,3 +1,4 @@
+
 <div align="center">
 
 # 🛡️ NASONNATION // COMMAND
@@ -25,13 +26,11 @@ Designed around the constraints of edge hardware, **Command** decouples ultra-lo
 
 ## 📸 Tactical Interface Showcase
 
-> *Screenshots below reflect the live multi-camera deployment running on Debian Linux (`bossman`).*
+> *Screenshot below reflects the live multi-camera deployment running on Debian Linux (`bossman`).*
 
-| **3-Camera Tactical Matrix & Kill-Feed Rail** | **Theater Mode + Digital PTZ Auto-Lock** |
+| **3-Camera Tactical Matrix & Kill-Feed Rail** |
 | :---: | :---: |
-| ![Tactical Matrix](docs/screenshots/tactical-matrix.png)<br>*Live WebRTC grid with L-bracket reticles, 2.5s SVG trajectory vectors, and real-time Kill-Feed crop rail.* | ![Theater Mode PTZ](docs/screenshots/theater-ptz-lock.png)<br>*75% primary viewport with hardware-accelerated digital zoom (`1x–5x`) and automated target centroid tracking.* |
-| **Interactive Polygon Exclusion & Tripwire Zones** | **Hybrid RTX 3060 Ti VLM Deep Inspect & Command Agent** |
-| ![Polygon Zones](docs/screenshots/polygon-zones.png)<br>*In-browser polygon drawing for static false-positive suppression and perimeter breach alerts.* | ![VLM Deep Inspect](docs/screenshots/vlm-deep-inspect.png)<br>*Asynchronous LAN GPU vision offload (`Ollama` / VLM) for rich target attributes and natural-language SQL/UI control.* |
+| <img width="1904" height="860" alt="driveway_zoom" src="https://github.com/user-attachments/assets/186b549f-20ee-4a31-85c9-83a3685bc5c8" /><br>*Live WebRTC grid with L-bracket reticles, 2.5s SVG trajectory vectors, and real-time Kill-Feed crop rail.* |
 
 ---
 
