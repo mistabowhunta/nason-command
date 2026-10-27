@@ -17,7 +17,7 @@ from sqlalchemy import select, delete, text
 from app.api.ws import router as ws_router, telemetry_and_cv_broadcaster
 from app.db.session import init_db, AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone, CameraSchedule, KnownFace, PushSettings
-from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, SNAPSHOT_DIR
+from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, SNAPSHOT_DIR, get_snapshots_storage_mb
 from app.services.face_engine import face_engine, FACE_CROPS_DIR
 from app.services.watchlist_scraper import periodic_watchlist_worker, sync_public_mugshot_feeds
 from app.services.push_notifier import get_push_config, send_tactical_push
@@ -161,6 +161,7 @@ async def health_check():
         "status": "ONLINE",
         "system": "NasonNation | Command",
         "enrolled_faces": len(face_engine.gallery),
+        "storage_mb": get_snapshots_storage_mb(),
     }
 
 
@@ -452,9 +453,24 @@ async def clear_camera_zones(camera_id: str):
     return await sync_zones_to_engine(app.state.cv_engine)
 
 
+@app.post("/api/detections/heatmap/{camera_id}/clear")
+async def clear_camera_heatmap_endpoint(camera_id: str):
+    cv_engine = getattr(app.state, "cv_engine", None)
+    if cv_engine:
+        cv_engine.clear_camera_heatmap(camera_id)
+    return {"camera_id": camera_id, "cleared": True, "points": []}
+
+
 @app.get("/api/detections/heatmap/{camera_id}")
 async def get_camera_heatmap(camera_id: str):
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cv_engine = getattr(app.state, "cv_engine", None)
+    default_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = (
+        max(default_cutoff, cv_engine.heatmap_cleared_at.get(camera_id, default_cutoff))
+        if cv_engine
+        else default_cutoff
+    )
+
     points = []
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -472,7 +488,6 @@ async def get_camera_heatmap(camera_id: str):
                 "breach": "BREACH" in (r.full_label or ""),
             })
 
-    cv_engine = getattr(app.state, "cv_engine", None)
     if cv_engine and hasattr(cv_engine, "heatmap_traces"):
         now_ts = time.time()
         for pt in list(cv_engine.heatmap_traces.get(camera_id, [])):
@@ -532,7 +547,7 @@ async def purge_all_detections():
     cv_engine = getattr(app.state, "cv_engine", None)
     if cv_engine and hasattr(cv_engine, "heatmap_traces"):
         for k in cv_engine.heatmap_traces:
-            cv_engine.heatmap_traces[k].clear()
+            cv_engine.clear_camera_heatmap(k)
     async with AsyncSessionLocal() as session:
         await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
         await session.commit()

@@ -1,28 +1,19 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-# System libs for OpenCV video decoding + graphics libraries for ultralytics export
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
     libglib2.0-0 \
-    libgl1 ffmpeg \
-    libgomp1 \
+    ffmpeg \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir ultralytics onnx
 
-# Generate yolov8s.onnx natively via Python on disk during build
-RUN python -c "from ultralytics import YOLO; model = YOLO('yolov8s.pt'); model.export(format='onnx', imgsz=640)" && \
-    mkdir -p /app/models && \
-    mv yolov8s.onnx /app/models/yolov8s.onnx
-
-COPY ./app /app/app
+COPY models/ /app/models/
+COPY . .
 
 EXPOSE 8080
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

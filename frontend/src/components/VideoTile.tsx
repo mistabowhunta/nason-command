@@ -574,6 +574,18 @@ export function VideoTile({
                 <Flame className="w-3 h-3" />
                 <span className="hidden sm:inline">HEAT</span>
               </button>
+              {showHeatmap && (
+                <button
+                  onClick={async () => {
+                    await fetch(`${apiBase}/api/detections/heatmap/${streamName}/clear`, { method: 'POST' });
+                    setHeatmapPoints([]);
+                  }}
+                  title="Clear only the thermal heat signatures on this camera"
+                  className="bg-zinc-950/90 hover:bg-red-950 border border-orange-500/50 px-1.5 py-1 rounded text-[10px] font-mono font-bold text-orange-300 cursor-pointer"
+                >
+                  CLEAR HEAT
+                </button>
+              )}
 
               <button
                 onClick={() => setShowBbox((prev) => !prev)}

@@ -1,5 +1,6 @@
 import asyncio
 from collections import deque
+import glob
 import math
 import os
 import subprocess
@@ -21,6 +22,7 @@ LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 RTSP_BASE = os.getenv("MEDIAMTX_RTSP_BASE", "rtsp://mediamtx:8554")
 MODEL_PATH = "/app/models/yolov8s.onnx" if os.path.exists("/app/models/yolov8s.onnx") else "/app/models/yolov8n.onnx"
 SNAPSHOT_DIR = "/tmp/command_snapshots"
+MAX_STORAGE_BYTES = 2048 * 1024 * 1024  # 2.0 GB rolling cap for /tmp/command_snapshots
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
 YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
@@ -36,10 +38,49 @@ YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
 }
 
 MIN_CONF_BY_CATEGORY = {
-    "person": 0.48,
+    "person": 0.45,   # Lowered slightly so Jennifer on DRIVEWAY is never missed
     "vehicle": 0.45,
-    "animal": 0.58,
+    "animal": 0.56,
 }
+
+
+def get_snapshots_storage_mb() -> float:
+    total = 0
+    for f in glob.glob(f"{SNAPSHOT_DIR}/*"):
+        try:
+            total += os.path.getsize(f)
+        except OSError:
+            pass
+    return round(total / (1024.0 * 1024.0), 1)
+
+
+def enforce_storage_limits():
+    """Auto-prunes oldest snapshots/MP4 clips if /tmp/command_snapshots exceeds 2.0 GB or 7 days."""
+    files = []
+    now = time.time()
+    total_bytes = 0
+    for path in glob.glob(f"{SNAPSHOT_DIR}/*"):
+        try:
+            st = os.stat(path)
+            # Delete anything older than 7 days immediately
+            if now - st.st_mtime > 604800:
+                os.remove(path)
+                continue
+            files.append((st.st_mtime, st.st_size, path))
+            total_bytes += st.st_size
+        except OSError:
+            pass
+
+    if total_bytes > MAX_STORAGE_BYTES:
+        files.sort(key=lambda x: x[0])  # Oldest first
+        for _, sz, path in files:
+            try:
+                os.remove(path)
+                total_bytes -= sz
+                if total_bytes <= MAX_STORAGE_BYTES * 0.85:
+                    break
+            except OSError:
+                pass
 
 
 def compute_iou(a: dict, b: dict) -> float:
@@ -75,22 +116,57 @@ def point_in_polygon(x: float, y: float, poly: list[dict]) -> bool:
     return inside
 
 
-def bbox_touches_polygon(det: dict, poly: list[dict]) -> bool:
+def segments_intersect(ax: float, ay: float, bx: float, by: float, cx: float, cy: float, dx: float, dy: float) -> bool:
+    def ccw(p1x, p1y, p2x, p2y, p3x, p3y):
+        return (p3y - p1y) * (p2x - p1x) > (p2y - p1y) * (p3x - p1x)
+
+    return (ccw(ax, ay, cx, cy, dx, dy) != ccw(bx, by, cx, cy, dx, dy)) and (
+        ccw(ax, ay, bx, by, cx, cy) != ccw(ax, ay, bx, by, dx, dy)
+    )
+
+
+def bbox_or_step_touches_polygon(det: dict, poly: list[dict], prev_foot: tuple[float, float] | None = None) -> bool:
+    """
+    Checks:
+    1. 7 anchor points across the bounding box (feet, ankles, knees, waist, corners).
+    2. Polygon vertices inside the bounding box.
+    3. Trajectory line-segment intersection between previous frame's feet and current frame's feet
+       so briskly walking targets can never step over a thin tripwire between frames.
+    """
+    n = len(poly)
+    if n < 3:
+        return False
+
     x, y, w, h = det["x"], det["y"], det["w"], det["h"]
+    curr_foot_x = x + w * 0.50
+    curr_foot_y = y + h * 0.95
+
     test_points = [
-        (x + w * 0.50, y + h * 0.50),
-        (x + w * 0.50, y + h * 0.95),
-        (x + w * 0.20, y + h * 0.92),
-        (x + w * 0.80, y + h * 0.92),
-        (x + w * 0.50, y + h * 0.75),
+        (curr_foot_x, curr_foot_y),          # Bottom-center feet
+        (x + w * 0.20, y + h * 0.93),        # Left foot
+        (x + w * 0.80, y + h * 0.93),        # Right foot
+        (x + w * 0.50, y + h * 0.80),        # Shins / knees
+        (x + w * 0.50, y + h * 0.65),        # Hips
+        (x + w * 0.50, y + h * 0.50),        # Waist centroid
     ]
     for px, py in test_points:
         if point_in_polygon(px, py, poly):
             return True
+
     for pt in poly:
         vx, vy = float(pt["x"]), float(pt["y"])
         if x <= vx <= (x + w) and y <= vy <= (y + h):
             return True
+
+    # Check if the footstep line segment from previous frame crossed any edge of the tripwire polygon
+    if prev_foot is not None:
+        pfx, pfy = prev_foot
+        for i in range(n):
+            p1x, p1y = float(poly[i]["x"]), float(poly[i]["y"])
+            p2x, p2y = float(poly[(i + 1) % n]["x"]), float(poly[(i + 1) % n]["y"])
+            if segments_intersect(pfx, pfy, curr_foot_x, curr_foot_y, p1x, p1y, p2x, p2y):
+                return True
+
     return False
 
 
@@ -268,11 +344,11 @@ class TrueDisplacementTracker:
             slot: t for slot, t in self.tracks.items() if now - t["last_seen"] < 25.0
         }
         self.spatial_cooldowns = [
-            c for c in self.spatial_cooldowns if now - c["time"] < 120.0
+            c for c in self.spatial_cooldowns if now - c["time"] < 60.0
         ]
 
         if not raw_detections:
-            if now - self.last_valid_time < 0.40:
+            if now - self.last_valid_time < 0.45:
                 return self.last_valid_boxes, []
             self.last_valid_boxes = []
             return [], []
@@ -299,8 +375,10 @@ class TrueDisplacementTracker:
                 used_slots.add(best_slot)
                 tr = self.tracks[best_slot]
                 step_disp = math.hypot(cx - tr["cx"], cy - tr["cy"])
+                det["prev_foot"] = (tr["cx"], tr["foot_y"])
                 tr["cx"] = cx
                 tr["cy"] = cy
+                tr["foot_y"] = det["y"] + det["h"] * 0.95
                 tr["area"] = det["area"]
                 tr["last_seen"] = now
                 tr["history"].append((cx, cy, step_disp, now))
@@ -312,18 +390,18 @@ class TrueDisplacementTracker:
             cx = det["x"] + det["w"] / 2.0
             cy = det["y"] + det["h"] / 2.0
             best_slot = None
-            max_jump = 0.38 if det["category"] == "vehicle" else 0.28
+            max_jump = 0.38 if det["category"] == "vehicle" else 0.30
             best_dist = max_jump
 
             for slot, track in self.tracks.items():
                 if slot in used_slots or track["category"] != det["category"]:
                     continue
-                if now - track["last_seen"] > 1.6:
+                if now - track["last_seen"] > 1.8:
                     continue
                 area_ratio = max(det["area"], track.get("area", det["area"])) / max(
                     0.0005, min(det["area"], track.get("area", det["area"]))
                 )
-                if area_ratio > 2.1:
+                if area_ratio > 2.2:
                     continue
                 dist = math.hypot(cx - track["cx"], cy - track["cy"])
                 if dist < best_dist:
@@ -334,8 +412,10 @@ class TrueDisplacementTracker:
                 used_slots.add(best_slot)
                 tr = self.tracks[best_slot]
                 step_disp = math.hypot(cx - tr["cx"], cy - tr["cy"])
+                det["prev_foot"] = (tr["cx"], tr["foot_y"])
                 tr["cx"] = cx
                 tr["cy"] = cy
+                tr["foot_y"] = det["y"] + det["h"] * 0.95
                 tr["area"] = det["area"]
                 tr["last_seen"] = now
                 tr["history"].append((cx, cy, step_disp, now))
@@ -353,15 +433,19 @@ class TrueDisplacementTracker:
             self.tracks[slot] = {
                 "cx": cx,
                 "cy": cy,
+                "foot_y": det["y"] + det["h"] * 0.95,
                 "area": det["area"],
                 "category": det["category"],
                 "face_name": None,
                 "face_role": None,
                 "face_sightings": 1,
+                "breach_latched": False,
+                "breach_logged": False,
                 "last_seen": now,
                 "history": deque([(cx, cy, 0.0, now)], maxlen=8),
             }
             det["step_disp"] = 0.0
+            det["prev_foot"] = None
             assigned.append((slot, det))
 
         assigned.sort(key=lambda item: item[0])
@@ -375,7 +459,8 @@ class TrueDisplacementTracker:
                 continue
 
             motion_ratio = bbox_intersection_ratio(det, motion_boxes)
-            req_motion = 0.25 if det["category"] == "vehicle" else 0.05
+            # Lowered person motion/displacement requirements so foreshortened driveway walking is never dropped
+            req_motion = 0.25 if det["category"] == "vehicle" else 0.025
             if motion_ratio < req_motion:
                 continue
 
@@ -383,8 +468,8 @@ class TrueDisplacementTracker:
             net_disp = math.hypot(tr["cx"] - oldest_cx, tr["cy"] - oldest_cy)
             step_disp = det.get("step_disp", 0.0)
 
-            req_net_disp = 0.080 if det["category"] == "vehicle" else 0.038
-            req_step_disp = 0.016 if det["category"] == "vehicle" else 0.009
+            req_net_disp = 0.080 if det["category"] == "vehicle" else 0.022
+            req_step_disp = 0.016 if det["category"] == "vehicle" else 0.004
 
             if net_disp < req_net_disp or step_disp < req_step_disp:
                 continue
@@ -400,12 +485,21 @@ class TrueDisplacementTracker:
             recognized_role = tr.get("face_role")
             recognized_sightings = tr.get("face_sightings", 1)
 
-            is_breach = recognized_role in ("watchlist", "watchlist_auto")
-            if not is_breach:
-                for z in cam_zones:
-                    if z["zone_type"] == "tripwire" and bbox_touches_polygon(det, z["points"]):
-                        is_breach = False if recognized_role == "whitelist" else True
-                        break
+            # Check physical Tripwire Polygon crossing (including trajectory segment between frames)
+            crossed_tripwire_now = False
+            for z in cam_zones:
+                if z["zone_type"] == "tripwire" and bbox_or_step_touches_polygon(det, z["points"], det.get("prev_foot")):
+                    if recognized_role != "whitelist":
+                        crossed_tripwire_now = True
+                    break
+
+            if crossed_tripwire_now:
+                tr["breach_latched"] = True
+            elif recognized_role == "whitelist":
+                tr["breach_latched"] = False
+
+            is_breach = bool(tr.get("breach_latched", False))
+            is_watchlist = recognized_role in ("watchlist", "watchlist_auto")
 
             slot_name = f"Motion_{slot}"
             suffix = "_BREACH" if is_breach else ""
@@ -413,7 +507,7 @@ class TrueDisplacementTracker:
                 full_label = f"{slot_name}_{recognized_name}{suffix}"
                 if recognized_role == "visitor":
                     sub_type_label = f"ID: {recognized_name} ({recognized_sightings}x)"
-                elif recognized_role in ("watchlist", "watchlist_auto"):
+                elif is_watchlist:
                     sub_type_label = f"⚠️ WATCHLIST: {recognized_name}"
                 else:
                     sub_type_label = f"ID: {recognized_name}"
@@ -436,13 +530,18 @@ class TrueDisplacementTracker:
             }
             active_output.append(box_item)
 
+            # CRITICAL FIX: If a track newly crosses a tripwire, ALWAYS log the breach even if a normal event was logged moments ago!
+            just_breached = is_breach and not tr.get("breach_logged", False)
             already_logged_here = any(
                 c["category"] == det["category"]
                 and math.hypot(tr["cx"] - c["cx"], tr["cy"] - c["cy"]) < 0.14
-                and (now - c["time"]) < 60.0
+                and (now - c["time"]) < 45.0
                 for c in self.spatial_cooldowns
             )
-            if not already_logged_here:
+
+            if just_breached or not already_logged_here:
+                if is_breach:
+                    tr["breach_logged"] = True
                 self.spatial_cooldowns.append({
                     "category": det["category"],
                     "cx": tr["cx"],
@@ -456,7 +555,7 @@ class TrueDisplacementTracker:
             self.last_valid_time = now
             return active_output, new_db_events
 
-        if now - self.last_valid_time < 0.40:
+        if now - self.last_valid_time < 0.45:
             return self.last_valid_boxes, []
         self.last_valid_boxes = []
         return [], []
@@ -470,6 +569,9 @@ class EdgeCVEngine:
         self.running = True
         self.latest_detections: dict[str, list[dict]] = {s: [] for s in streams}
         self.heatmap_traces: dict[str, deque] = {s: deque(maxlen=1500) for s in streams}
+        self.heatmap_cleared_at: dict[str, datetime] = {
+            s: datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=24) for s in streams
+        }
         self.last_heat_sample: dict[str, float] = {s: 0.0 for s in streams}
         self.zones: dict[str, list[dict]] = {s: [] for s in streams}
         self.schedules: dict[str, dict] = {
@@ -479,6 +581,7 @@ class EdgeCVEngine:
         self.zones_lock = threading.Lock()
         self.grabbers: list[LatestFrameGrabber] = []
         self.infer_lock = threading.Lock()
+        self.last_storage_check = 0.0
 
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 2
@@ -487,6 +590,11 @@ class EdgeCVEngine:
             MODEL_PATH, sess_options=sess_opts, providers=["CPUExecutionProvider"]
         )
         self.input_name = self.ort_session.get_inputs()[0].name
+
+    def clear_camera_heatmap(self, camera_id: str):
+        if camera_id in self.heatmap_traces:
+            self.heatmap_traces[camera_id].clear()
+        self.heatmap_cleared_at[camera_id] = datetime.now(timezone.utc)
 
     def set_schedules(self, sched_map: dict[str, dict]):
         with self.zones_lock:
@@ -583,7 +691,7 @@ class EdgeCVEngine:
                     continue
 
                 area = w * h
-                if category == "person" and (h < 0.065 or area < 0.0025):
+                if category == "person" and (h < 0.055 or area < 0.0020):
                     continue
                 if category == "vehicle" and (w < 0.045 or area < 0.0025):
                     continue
@@ -603,6 +711,11 @@ class EdgeCVEngine:
         fh, fw, _ = frame.shape
         now_ts = time.time()
         ts_ms = int(now_ts * 1000)
+
+        if now_ts - self.last_storage_check > 600.0:
+            self.last_storage_check = now_ts
+            threading.Thread(target=enforce_storage_limits, daemon=True).start()
+
         for ev in db_events:
             snap_id = f"{stream_name}_{ts_ms}_{ev['slot']}.jpg"
             pad_x = ev["w"] * 0.18
@@ -626,7 +739,7 @@ class EdgeCVEngine:
         grabber = LatestFrameGrabber(rtsp_url)
         self.grabbers.append(grabber)
 
-        bg_sub = cv2.createBackgroundSubtractorMOG2(history=400, varThreshold=22, detectShadows=False)
+        bg_sub = cv2.createBackgroundSubtractorMOG2(history=400, varThreshold=20, detectShadows=False)
         tracker = TrueDisplacementTracker()
         parked_registry = ParkedVehicleRegistry()
         last_processed_time = 0.0
@@ -647,7 +760,7 @@ class EdgeCVEngine:
 
             motion_boxes = []
             for c in contours:
-                if cv2.contourArea(c) < 110:
+                if cv2.contourArea(c) < 85:
                     continue
                 mx, my, mw, mh = cv2.boundingRect(c)
                 motion_boxes.append((mx / 640.0, my / 360.0, mw / 640.0, mh / 360.0))

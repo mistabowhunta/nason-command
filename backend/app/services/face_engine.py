@@ -16,7 +16,9 @@ KNOWN_FACES_DIR = "/app/app/known_faces"
 FACE_CROPS_DIR = "/tmp/command_faces"
 os.makedirs(FACE_CROPS_DIR, exist_ok=True)
 
-COSINE_THRESHOLD = 0.363
+WHITELIST_THRESHOLD = 0.360   # Standard threshold for enrolled family members
+VISITOR_THRESHOLD = 0.385     # Threshold for repeat visitor clustering
+WATCHLIST_THRESHOLD = 0.520   # Strict 1-to-N threshold so FBI mugshots never false-flag family/neighbors
 
 
 class BiometricFaceEngine:
@@ -32,7 +34,7 @@ class BiometricFaceEngine:
                     model=YUNET_PATH,
                     config="",
                     input_size=(320, 320),
-                    score_threshold=0.58,
+                    score_threshold=0.60,
                     nms_threshold=0.30,
                     top_k=50,
                 )
@@ -46,7 +48,6 @@ class BiometricFaceEngine:
                 print(f"[FACE ENGINE ERROR] {e}")
 
     def extract_face_data(self, bgr_img: np.ndarray) -> tuple[np.ndarray | None, float, np.ndarray | None]:
-        """Returns (128D_norm_vector, detection_confidence, padded_face_crop_bgr)."""
         if not self.enabled or bgr_img is None or bgr_img.size == 0:
             return None, 0.0, None
 
@@ -80,7 +81,6 @@ class BiometricFaceEngine:
             if norm > 0:
                 vec = vec / norm
 
-            # Create a clean padded portrait crop for the UI / OSINT export
             fx, fy, fw_box, fh_box = int(best_face[0]), int(best_face[1]), int(best_face[2]), int(best_face[3])
             pad_w, pad_h = int(fw_box * 0.45), int(fh_box * 0.45)
             cx1 = max(0, fx - pad_w)
@@ -95,28 +95,65 @@ class BiometricFaceEngine:
         vec, _, _ = self.extract_face_data(bgr_img)
         return vec
 
-    def match_embedding(self, query_vec: np.ndarray) -> tuple[str | None, str | None, float, int]:
-        """Returns (NAME, role, cosine_score, sightings) or (None, None, 0.0, 0)."""
+    def match_embedding(self, query_vec: np.ndarray, det_score: float = 0.80) -> tuple[str | None, str | None, float, int]:
+        """
+        Priority-tiered biometric matching:
+        1. Whitelist family members first (>= 0.360)
+        2. Known repeat visitors second (>= 0.385)
+        3. Watchlist / FBI mugshots last (requires >= 0.520 cosine similarity AND det_score >= 0.78)
+        """
         if query_vec is None or not self.gallery:
             return None, None, 0.0, 0
 
-        best_item = None
-        best_score = 0.0
-
+        # Tier 1: Whitelist
+        best_wl = None
+        best_wl_score = 0.0
         for item in self.gallery:
-            score = float(np.dot(query_vec, item["vec"]))
-            if score > best_score:
-                best_score = score
-                best_item = item
+            if item["role"] != "whitelist":
+                continue
+            sc = float(np.dot(query_vec, item["vec"]))
+            if sc > best_wl_score:
+                best_wl_score = sc
+                best_wl = item
 
-        if best_score >= COSINE_THRESHOLD and best_item:
-            return (
-                best_item["name"].upper(),
-                best_item["role"],
-                round(best_score, 3),
-                int(best_item.get("sightings", 1)),
-            )
-        return None, None, round(best_score, 3), 0
+        if best_wl and best_wl_score >= WHITELIST_THRESHOLD:
+            return best_wl["name"].upper(), "whitelist", round(best_wl_score, 3), int(best_wl.get("sightings") or 1)
+
+        # Tier 2: Repeat Visitors
+        best_vis = None
+        best_vis_score = 0.0
+        for item in self.gallery:
+            if item["role"] != "visitor":
+                continue
+            sc = float(np.dot(query_vec, item["vec"]))
+            if sc > best_vis_score:
+                best_vis_score = sc
+                best_vis = item
+
+        if best_vis and best_vis_score >= VISITOR_THRESHOLD:
+            return best_vis["name"].upper(), "visitor", round(best_vis_score, 3), int(best_vis.get("sightings") or 1)
+
+        # Tier 3: Watchlist & Auto-Scraped FBI/DOC Fugitives (strict threshold to prevent false felon alerts)
+        if det_score >= 0.78:
+            best_watch = None
+            best_watch_score = 0.0
+            for item in self.gallery:
+                if item["role"] not in ("watchlist", "watchlist_auto"):
+                    continue
+                sc = float(np.dot(query_vec, item["vec"]))
+                if sc > best_watch_score:
+                    best_watch_score = sc
+                    best_watch = item
+
+            if best_watch and best_watch_score >= WATCHLIST_THRESHOLD:
+                return (
+                    best_watch["name"].upper(),
+                    best_watch["role"],
+                    round(best_watch_score, 3),
+                    int(best_watch.get("sightings") or 0),
+                )
+
+        return None, None, round(max(best_wl_score, best_vis_score), 3), 0
 
     def identify_person_in_frame(self, frame: np.ndarray, det: dict) -> tuple[str | None, str | None, float, int]:
         if not self.enabled or not self.gallery:
@@ -130,21 +167,16 @@ class BiometricFaceEngine:
         x2 = int(min(1.0, det["x"] + det["w"] + pad_x) * fw)
         y2 = int(min(1.0, det["y"] + det["h"] * 0.72 + pad_y) * fh)
 
-        vec, _, _ = self.extract_face_data(frame[y1:y2, x1:x2])
+        vec, det_score, _ = self.extract_face_data(frame[y1:y2, x1:x2])
         if vec is None:
             y2_full = int(min(1.0, det["y"] + det["h"] + pad_y) * fh)
-            vec, _, _ = self.extract_face_data(frame[y1:y2_full, x1:x2])
+            vec, det_score, _ = self.extract_face_data(frame[y1:y2_full, x1:x2])
 
         if vec is None:
             return None, None, 0.0, 0
-        return self.match_embedding(vec)
+        return self.match_embedding(vec, det_score)
 
     async def process_snapshot_biometrics(self, crop_path: str) -> dict | None:
-        """
-        Runs on newly saved person snapshots:
-        1. If face matches existing Whitelist / Watchlist / Visitor -> bumps sightings count & last_seen.
-        2. If face is unknown AND clear (det_score >= 0.75) -> auto-enrolls as VISITOR_XX!
-        """
         if not self.enabled or not os.path.exists(crop_path):
             return None
 
@@ -156,11 +188,10 @@ class BiometricFaceEngine:
         if vec is None:
             return None
 
-        fname, frole, fscore, sightings = self.match_embedding(vec)
+        fname, frole, fscore, sightings = self.match_embedding(vec, det_score)
         now_ts = time.time()
 
         if fname:
-            # Known person or repeat visitor: bump sightings (throttled once per 45s per name)
             if now_ts - self.last_sighting_bump.get(fname, 0.0) > 45.0:
                 self.last_sighting_bump[fname] = now_ts
                 sightings += 1
@@ -184,8 +215,7 @@ class BiometricFaceEngine:
                 "auto_enrolled": False,
             }
 
-        # Unknown face: only auto-cluster as VISITOR_XX if face is high confidence
-        if det_score < 0.75 or face_crop is None:
+        if det_score < 0.78 or face_crop is None:
             return None
 
         existing_visitor_nums = []
