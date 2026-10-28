@@ -16,9 +16,9 @@ KNOWN_FACES_DIR = "/app/app/known_faces"
 FACE_CROPS_DIR = "/tmp/command_faces"
 os.makedirs(FACE_CROPS_DIR, exist_ok=True)
 
-WHITELIST_THRESHOLD = 0.360   # Standard threshold for enrolled family members
-VISITOR_THRESHOLD = 0.385     # Threshold for repeat visitor clustering
-WATCHLIST_THRESHOLD = 0.520   # Strict 1-to-N threshold so FBI mugshots never false-flag family/neighbors
+WHITELIST_THRESHOLD = 0.360
+VISITOR_THRESHOLD = 0.385
+WATCHLIST_THRESHOLD = 0.520
 
 
 class BiometricFaceEngine:
@@ -38,12 +38,8 @@ class BiometricFaceEngine:
                     nms_threshold=0.30,
                     top_k=50,
                 )
-                self.recognizer = cv2.FaceRecognizerSF.create(
-                    model=SFACE_PATH,
-                    config="",
-                )
+                self.recognizer = cv2.FaceRecognizerSF.create(model=SFACE_PATH, config="")
                 self.enabled = True
-                print("[FACE ENGINE] YuNet + SFace Biometric Engine ready.")
             except Exception as e:
                 print(f"[FACE ENGINE ERROR] {e}")
 
@@ -67,7 +63,6 @@ class BiometricFaceEngine:
             wh, ww = work_img.shape[:2]
             self.detector.setInputSize((ww, wh))
             _, faces = self.detector.detect(work_img)
-
             if faces is None or len(faces) == 0:
                 return None, 0.0, None
 
@@ -83,12 +78,9 @@ class BiometricFaceEngine:
 
             fx, fy, fw_box, fh_box = int(best_face[0]), int(best_face[1]), int(best_face[2]), int(best_face[3])
             pad_w, pad_h = int(fw_box * 0.45), int(fh_box * 0.45)
-            cx1 = max(0, fx - pad_w)
-            cy1 = max(0, fy - pad_h)
-            cx2 = min(ww, fx + fw_box + pad_w)
-            cy2 = min(wh, fy + fh_box + pad_h)
+            cx1, cy1 = max(0, fx - pad_w), max(0, fy - pad_h)
+            cx2, cy2 = min(ww, fx + fw_box + pad_w), min(wh, fy + fh_box + pad_h)
             face_crop = work_img[cy1:cy2, cx1:cx2].copy() if cy2 > cy1 and cx2 > cx1 else aligned.copy()
-
             return vec, det_score, face_crop
 
     def extract_largest_face_embedding(self, bgr_img: np.ndarray) -> np.ndarray | None:
@@ -96,54 +88,39 @@ class BiometricFaceEngine:
         return vec
 
     def match_embedding(self, query_vec: np.ndarray, det_score: float = 0.80) -> tuple[str | None, str | None, float, int]:
-        """
-        Priority-tiered biometric matching:
-        1. Whitelist family members first (>= 0.360)
-        2. Known repeat visitors second (>= 0.385)
-        3. Watchlist / FBI mugshots last (requires >= 0.520 cosine similarity AND det_score >= 0.78)
-        """
         if query_vec is None or not self.gallery:
             return None, None, 0.0, 0
 
-        # Tier 1: Whitelist
-        best_wl = None
-        best_wl_score = 0.0
+        best_wl, best_wl_score = None, 0.0
         for item in self.gallery:
             if item["role"] != "whitelist":
                 continue
             sc = float(np.dot(query_vec, item["vec"]))
             if sc > best_wl_score:
-                best_wl_score = sc
-                best_wl = item
+                best_wl_score, best_wl = sc, item
 
         if best_wl and best_wl_score >= WHITELIST_THRESHOLD:
             return best_wl["name"].upper(), "whitelist", round(best_wl_score, 3), int(best_wl.get("sightings") or 1)
 
-        # Tier 2: Repeat Visitors
-        best_vis = None
-        best_vis_score = 0.0
+        best_vis, best_vis_score = None, 0.0
         for item in self.gallery:
             if item["role"] != "visitor":
                 continue
             sc = float(np.dot(query_vec, item["vec"]))
             if sc > best_vis_score:
-                best_vis_score = sc
-                best_vis = item
+                best_vis_score, best_vis = sc, item
 
         if best_vis and best_vis_score >= VISITOR_THRESHOLD:
             return best_vis["name"].upper(), "visitor", round(best_vis_score, 3), int(best_vis.get("sightings") or 1)
 
-        # Tier 3: Watchlist & Auto-Scraped FBI/DOC Fugitives (strict threshold to prevent false felon alerts)
         if det_score >= 0.78:
-            best_watch = None
-            best_watch_score = 0.0
+            best_watch, best_watch_score = None, 0.0
             for item in self.gallery:
                 if item["role"] not in ("watchlist", "watchlist_auto"):
                     continue
                 sc = float(np.dot(query_vec, item["vec"]))
                 if sc > best_watch_score:
-                    best_watch_score = sc
-                    best_watch = item
+                    best_watch_score, best_watch = sc, item
 
             if best_watch and best_watch_score >= WATCHLIST_THRESHOLD:
                 return (
@@ -160,8 +137,7 @@ class BiometricFaceEngine:
             return None, None, 0.0, 0
 
         fh, fw = frame.shape[:2]
-        pad_x = det["w"] * 0.15
-        pad_y = det["h"] * 0.12
+        pad_x, pad_y = det["w"] * 0.15, det["h"] * 0.12
         x1 = int(max(0.0, det["x"] - pad_x) * fw)
         y1 = int(max(0.0, det["y"] - pad_y) * fh)
         x2 = int(min(1.0, det["x"] + det["w"] + pad_x) * fw)
@@ -207,89 +183,41 @@ class BiometricFaceEngine:
                         item["sightings"] = sightings
                         item["last_seen"] = datetime.now(timezone.utc).isoformat()
 
-            return {
-                "name": fname,
-                "role": frole,
-                "score": fscore,
-                "sightings": sightings,
-                "auto_enrolled": False,
-            }
+            return {"name": fname, "role": frole, "score": fscore, "sightings": sightings, "auto_enrolled": False}
 
         if det_score < 0.78 or face_crop is None:
             return None
 
-        existing_visitor_nums = []
-        for item in self.gallery:
-            nm = item["name"]
-            if nm.startswith("VISITOR_"):
-                tail = nm.replace("VISITOR_", "").strip()
-                if tail.isdigit():
-                    existing_visitor_nums.append(int(tail))
-        next_num = (max(existing_visitor_nums) + 1) if existing_visitor_nums else 1
+        existing_nums = [
+            int(item["name"].replace("VISITOR_", "").strip())
+            for item in self.gallery
+            if item["name"].startswith("VISITOR_") and item["name"].replace("VISITOR_", "").strip().isdigit()
+        ]
+        next_num = (max(existing_nums) + 1) if existing_nums else 1
         visitor_name = f"VISITOR_{next_num:02d}"
 
         crop_filename = f"face_{visitor_name}_{int(now_ts * 1000)}.jpg"
-        saved_crop_path = f"{FACE_CROPS_DIR}/{crop_filename}"
-        cv2.imwrite(saved_crop_path, face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+        cv2.imwrite(f"{FACE_CROPS_DIR}/{crop_filename}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
 
         async with AsyncSessionLocal() as session:
-            row = KnownFace(
-                name=visitor_name,
-                role="visitor",
-                embedding_json=json.dumps(vec.tolist()),
-                sample_crop=f"/face_crops/{crop_filename}",
-                sightings=1,
-                last_seen=datetime.now(timezone.utc),
+            session.add(
+                KnownFace(
+                    name=visitor_name,
+                    role="visitor",
+                    embedding_json=json.dumps(vec.tolist()),
+                    sample_crop=f"/face_crops/{crop_filename}",
+                    sightings=1,
+                    last_seen=datetime.now(timezone.utc),
+                )
             )
-            session.add(row)
             await session.commit()
 
         await self.sync_gallery_from_db_and_disk()
         self.last_sighting_bump[visitor_name] = now_ts
-
-        return {
-            "name": visitor_name,
-            "role": "visitor",
-            "score": 1.0,
-            "sightings": 1,
-            "auto_enrolled": True,
-        }
+        return {"name": visitor_name, "role": "visitor", "score": 1.0, "sightings": 1, "auto_enrolled": True}
 
     async def sync_gallery_from_db_and_disk(self):
         async with AsyncSessionLocal() as session:
-            if os.path.exists(KNOWN_FACES_DIR):
-                res = await session.execute(select(KnownFace))
-                existing_rows = res.scalars().all()
-                existing_samples = {r.sample_crop for r in existing_rows if r.sample_crop}
-
-                for person_dir in sorted(os.listdir(KNOWN_FACES_DIR)):
-                    full_dir = os.path.join(KNOWN_FACES_DIR, person_dir)
-                    if not os.path.isdir(full_dir) or person_dir.startswith("."):
-                        continue
-                    person_name = person_dir.strip().upper()
-                    role = "watchlist" if person_name.startswith("WATCHLIST") else "whitelist"
-                    for img_path in glob.glob(f"{full_dir}/*.*"):
-                        bname = os.path.basename(img_path)
-                        crop_url = f"/face_crops/disk_{person_name}_{bname}"
-                        if crop_url in existing_samples:
-                            continue
-                        img = cv2.imread(img_path)
-                        vec, _, face_crop = self.extract_face_data(img)
-                        if vec is not None:
-                            if face_crop is not None:
-                                cv2.imwrite(f"{FACE_CROPS_DIR}/disk_{person_name}_{bname}", face_crop)
-                            session.add(
-                                KnownFace(
-                                    name=person_name,
-                                    role=role,
-                                    embedding_json=json.dumps(vec.tolist()),
-                                    sample_crop=crop_url,
-                                    sightings=1,
-                                    last_seen=datetime.now(timezone.utc),
-                                )
-                            )
-                await session.commit()
-
             res = await session.execute(select(KnownFace).order_by(KnownFace.last_seen.desc()))
             rows = res.scalars().all()
             loaded = []
@@ -311,7 +239,6 @@ class BiometricFaceEngine:
                     })
                 except Exception:
                     pass
-
             self.gallery = loaded
             return loaded
 
