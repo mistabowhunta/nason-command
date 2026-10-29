@@ -12,7 +12,6 @@ import {
   Film,
   Image as ImageIcon,
   Lock,
-  Sparkles,
   Trash2,
   UserCheck,
   X,
@@ -48,6 +47,11 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
   const [faceNameInput, setFaceNameInput] = useState<string>('ISAAC');
   const [faceRoleInput, setFaceRoleInput] = useState<'whitelist' | 'watchlist'>('whitelist');
   const [enrollStatus, setEnrollStatus] = useState<string | null>(null);
+  const [teachingId, setTeachingId] = useState<number | null>(null);
+  const [teachCategory, setTeachCategory] = useState<string>('animal');
+  const [teachSubType, setTeachSubType] = useState<string>('dog');
+  const [teachNote, setTeachNote] = useState<string>('');
+  const [teachStatus, setTeachStatus] = useState<string | null>(null);
   const apiBase = `http://${hostIp}:8080`;
 
   const fetchEvents = async () => {
@@ -77,6 +81,49 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
       }
     } catch (err) {
       console.error('Failed to purge detections:', err);
+    }
+  };
+
+  const handleTeachSubmit = async (e: React.FormEvent, evId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTeachStatus('Saving lesson to AI memory...');
+    try {
+      const res = await fetch(`${apiBase}/api/detections/${evId}/teach`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          category: teachCategory,
+          sub_type: teachSubType.trim() || teachCategory,
+          note: teachNote.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && !data.error) {
+        setTeachStatus('Learned! Saved to AI memory.');
+        setEvents((prev) =>
+          prev.map((item) =>
+            item.id === evId
+              ? {
+                  ...item,
+                  category: data.category,
+                  sub_type: data.sub_type,
+                  full_label: data.full_label,
+                  attributes: data.attributes,
+                  ai_notes: data.ai_notes,
+                }
+              : item
+          )
+        );
+        window.setTimeout(() => {
+          setTeachingId(null);
+          setTeachStatus(null);
+        }, 900);
+      } else {
+        setTeachStatus(data.error || 'Failed to save lesson');
+      }
+    } catch {
+      setTeachStatus('Network error saving lesson');
     }
   };
 
@@ -321,19 +368,77 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                             </button>
                           )}
                           <button
-                            onClick={(e) => handleDeepInspect(e, ev.id)}
-                            disabled={inspectingId === ev.id}
-                            className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-950/90 hover:bg-emerald-900 text-emerald-300 border border-emerald-500/40 flex items-center gap-1 cursor-pointer"
-                          >
-                            <Sparkles className="w-2.5 h-2.5" />
-                            {inspectingId === ev.id ? '...' : 'INSPECT'}
-                          </button>
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (teachingId === ev.id) {
+                                  setTeachingId(null);
+                                } else {
+                                  setTeachingId(ev.id);
+                                  setTeachCategory(ev.category || 'animal');
+                                  setTeachSubType(ev.sub_type === 'cat' ? 'dog' : (ev.sub_type || 'dog'));
+                                  setTeachNote('');
+                                  setTeachStatus(null);
+                                }
+                              }}
+                              title="Correct a misidentification and teach the AI model"
+                              className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-950/90 hover:bg-amber-900 text-amber-300 border border-amber-500/40 flex items-center gap-1 cursor-pointer"
+                            >
+                              🎓 TEACH
+                            </button>
                         </div>
                       </div>
                     </div>
                   </div>
 
-                  {enrollingId === ev.id && (
+                  {teachingId === ev.id && (
+                <form
+                  onSubmit={(e) => handleTeachSubmit(e, ev.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  className="mt-2 p-2 rounded bg-zinc-950 border border-amber-500/40 space-y-1.5"
+                >
+                  <div className="text-[10px] font-mono font-bold text-amber-300">
+                    🎓 TEACH / CORRECT AI MODEL
+                  </div>
+                  <div className="flex gap-1.5">
+                    <select
+                      value={teachCategory}
+                      onChange={(e) => setTeachCategory(e.target.value)}
+                      className="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[10px] font-mono text-zinc-200"
+                    >
+                      <option value="animal">animal</option>
+                      <option value="person">person</option>
+                      <option value="delivery">delivery</option>
+                      <option value="vehicle">vehicle</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={teachSubType}
+                      onChange={(e) => setTeachSubType(e.target.value)}
+                      placeholder="True object (e.g. dog)"
+                      className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-[10px] font-mono text-zinc-100"
+                    />
+                  </div>
+                  <input
+                    type="text"
+                    value={teachNote}
+                    onChange={(e) => setTeachNote(e.target.value)}
+                    placeholder="Context (e.g. Black & white dog walked by owner with leash)"
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-[10px] font-mono text-zinc-100"
+                  />
+                  <div className="flex items-center justify-between gap-2 pt-0.5">
+                    <span className="text-[10px] font-mono text-amber-300/90 truncate">
+                      {teachStatus || 'Saves rule to persistent AI memory'}
+                    </span>
+                    <button
+                      type="submit"
+                      className="px-2.5 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-mono font-bold text-[10px] cursor-pointer shrink-0"
+                    >
+                      SAVE & TEACH
+                    </button>
+                  </div>
+                </form>
+              )}
+              {enrollingId === ev.id && (
                     <form
                       onClick={(e) => e.stopPropagation()}
                       onSubmit={(e) => handleEnrollFace(e, ev.id)}

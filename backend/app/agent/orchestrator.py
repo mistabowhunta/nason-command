@@ -300,143 +300,155 @@ async def process_command_prompt(prompt: str) -> dict:
         "engine": "SQL_TELEMETRY_ENGINE",
     }
 
-# --- v7 Override: Delivery/Service Logo Rules + Silent Landscapers + Driveway LPR ---
-import base64 as _b64
+# --- v7.1 Final: Deep Inspect with Taught AI Lessons, Delivery Rules, Driveway LPR & ai_notes Return ---
 from datetime import datetime as _dt, timezone as _tz
-import json as _json
-import os as _os
-import re as _re
-import httpx as _httpx
-from sqlalchemy import delete as _delete, select as _select, update as _update
-from app.db.session import AsyncSessionLocal as _AsyncSessionLocal
-from app.db.models import DetectionEvent as _DetectionEvent, KnownFace as _KnownFace
-from app.services.face_engine import face_engine as _face_engine
+from sqlalchemy import update as _update
+from app.db.models import KnownFace as _KnownFace
 from app.services.delivery_rules import get_delivery_rules as _get_delivery_rules, record_delivery_sighting as _record_delivery_sighting
+from app.services.ai_lessons import get_ai_lessons as _get_ai_lessons
 
-_V7_OLLAMA_URL = _os.getenv("OLLAMA_BASE_URL", "http://192.168.1.223:11434")
-_V7_OLLAMA_MODEL = _os.getenv("OLLAMA_MODEL", "qwen2.5vl:7b")
-_V7_SNAP_DIR = "/tmp/command_snapshots"
 
-def _v7_encode_b64(path: str):
-    if not path or not _os.path.exists(path):
-        return None
-    try:
-        with open(path, "rb") as f:
-            return _b64.b64encode(f.read()).decode("utf-8")
-    except Exception:
-        return None
+async def deep_inspect_detection(event_id: int) -> dict:
+    async with GPU_SEMAPHORE:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(DetectionEvent).where(DetectionEvent.id == event_id))
+            ev = result.scalar_one_or_none()
+            if not ev:
+                return {"error": "Event not found"}
 
-async def deep_inspect_detection(event_id: int):
-    async with _AsyncSessionLocal() as session:
-        res = await session.execute(_select(_DetectionEvent).where(_DetectionEvent.id == event_id))
-        ev = res.scalar_one_or_none()
-        if not ev:
-            return
-        snap_id = (ev.attributes or "").split("|")[0].strip()
-        crop_path = f"{_V7_SNAP_DIR}/crop_{snap_id}" if snap_id else ""
-        full_path = f"{_V7_SNAP_DIR}/full_{snap_id}" if snap_id else ""
-        plate_path = f"{_V7_SNAP_DIR}/plate_{snap_id}" if snap_id else ""
-        initial_category = ev.category
-        initial_label = ev.full_label or ""
-        initial_sub = ev.sub_type or ""
+            raw_attr = ev.attributes or ""
+            snap_id = raw_attr.split("|")[0].strip()
+            existing_note = raw_attr.split("|", 1)[1].strip() if "|" in raw_attr else ""
 
-    bio_result = None
-    if initial_category == "person" and _os.path.exists(crop_path):
-        try:
-            bio_result = await _face_engine.process_snapshot_biometrics(crop_path)
-        except Exception as e:
-            print(f"[ORCHESTRATOR BIO ERROR] {e}")
+            crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}" if snap_id else ""
+            full_path = f"{SNAPSHOT_DIR}/full_{snap_id}" if snap_id else ""
+            plate_path = f"{SNAPSHOT_DIR}/plate_{snap_id}" if snap_id else ""
 
-    is_whitelisted_person = bio_result and bio_result.get("role") == "whitelist"
-    rules = _get_delivery_rules()
-    active_rule_names = [r["id"] for r in rules]
-    rules_prompt_lines = "\n".join([f"- {r['id']}: {r.get('cues', '')}" for r in rules])
+            recognized_face = None
+            face_role = None
+            face_info = None
 
-    images_b64 = []
-    for p in (crop_path, plate_path, full_path):
-        b64 = _v7_encode_b64(p)
-        if b64 and b64 not in images_b64:
-            images_b64.append(b64)
-        if len(images_b64) >= 2:
-            break
+            if ev.category == "person" and os.path.exists(crop_path):
+                face_info = await face_engine.process_snapshot_biometrics(crop_path)
+                if face_info:
+                    fname = face_info["name"]
+                    face_role = face_info["role"]
+                    fsightings = face_info["sightings"]
+                    if face_role == "visitor":
+                        recognized_face = f"{fname} (Seen {fsightings}x)"
+                        ev.sub_type = f"ID: {fname} ({fsightings}x)"
+                    elif face_role in ("watchlist", "watchlist_auto"):
+                        recognized_face = f"⚠️ WATCHLIST: {fname} (Seen {fsightings}x)"
+                        ev.sub_type = f"⚠️ WATCHLIST: {fname}"
+                        ev.full_label = f"{ev.motion_slot}_{fname}_BREACH"
+                    else:
+                        recognized_face = f"{fname} (Seen {fsightings}x)"
+                        ev.sub_type = f"ID: {fname}"
+                        ev.full_label = f"{ev.motion_slot}_{fname}"
 
-    vlm_data = None
-    if images_b64 and not is_whitelisted_person:
-        prompt = f"""Analyze this security camera image and respond ONLY with a raw JSON object:
-1. Check for delivery carriers or service crews matching:
-{rules_prompt_lines}
-2. If a vehicle is in the driveway, identify its Color + Make/Body Type and read its license plate characters if visible.
-JSON schema:
-{{"matched_service": "ONE OF {active_rule_names} OR NONE", "vehicle_desc": "Color Make/Type or NONE", "license_plate": "PLATE or NONE", "summary": "1-sentence tactical summary"}}"""
-        try:
-            async with _httpx.AsyncClient(timeout=18.0) as client:
-                resp = await client.post(
-                    f"{_V7_OLLAMA_URL}/api/generate",
-                    json={"model": _V7_OLLAMA_MODEL, "prompt": prompt, "images": images_b64, "stream": False, "options": {"temperature": 0.1}},
-                )
-                if resp.status_code == 200:
-                    raw_txt = resp.json().get("response", "").strip()
-                    m = _re.search(r"\{.*\}", raw_txt, _re.DOTALL)
-                    if m:
-                        vlm_data = _json.loads(m.group(0))
-        except Exception as e:
-            print(f"[VLM INSPECT SKIPPED] {e}")
+            gpu_online, models = await probe_workstation_ollama()
+            chosen_vlm = pick_best_vlm(models) if gpu_online else None
 
-    new_category, new_sub, new_label = initial_category, initial_sub, initial_label
-    matched_service = (vlm_data.get("matched_service") or "NONE").strip().upper() if vlm_data else "NONE"
-    vehicle_desc = (vlm_data.get("vehicle_desc") or "NONE").strip() if vlm_data else "NONE"
-    license_plate = (vlm_data.get("license_plate") or "NONE").strip().upper() if vlm_data else "NONE"
-    vlm_summary = (vlm_data.get("summary") or "").strip() if vlm_data else ""
+            rules = _get_delivery_rules()
+            active_rule_names = [r["id"] for r in rules]
+            rules_text = "; ".join([f"{r['id']} ({r.get('cues', '')})" for r in rules])
 
-    if license_plate in ("NONE", "N/A", "UNKNOWN", "UNREADABLE", "NULL", ""):
-        license_plate = ""
-    if vehicle_desc in ("NONE", "N/A", "UNKNOWN", "NULL", ""):
-        vehicle_desc = ""
+            lessons = _get_ai_lessons(ev.camera_id)
+            lessons_text = "; ".join([
+                f"If detector guessed '{L['wrong_sub_type']}', check if it is actually '{L['correct_sub_type']}' ({L['note']})"
+                for L in lessons[-8:]
+            ])
 
-    rule_map = {r["id"]: r for r in rules}
-    if matched_service in rule_map and not is_whitelisted_person:
-        rule = rule_map[matched_service]
-        _record_delivery_sighting(matched_service, _dt.now(_tz.utc).isoformat())
-        if bio_result and bio_result.get("auto_enrolled") and bio_result.get("name", "").startswith("VISITOR_"):
-            async with _AsyncSessionLocal() as clean_sess:
-                await clean_sess.execute(_delete(_KnownFace).where(_KnownFace.name == bio_result["name"]))
-                await clean_sess.commit()
-            await _face_engine.sync_gallery_from_db_and_disk()
+            img_to_send = full_path if (ev.category == "animal" and os.path.exists(full_path)) else (crop_path if os.path.exists(crop_path) else full_path)
+            ai_notes_out = existing_note
 
-        new_category = "delivery"
-        plate_tag = f" [PLATE: {license_plate}]" if license_plate else ""
-        veh_tag = f" ({vehicle_desc})" if vehicle_desc else ""
-        base_slot = initial_label.split("_")[0] + "_" + initial_label.split("_")[1] if "_" in initial_label else "Motion_1"
-        if rule.get("alert_mode") == "silent":
-            new_label = f"{base_slot}_SERVICE_{matched_service}"
-            new_sub = f"🔇 SERVICE: {matched_service}{veh_tag}{plate_tag}"
-        else:
-            breach_suffix = "_BREACH" if initial_label.endswith("_BREACH") else ""
-            new_label = f"{base_slot}_DELIVERY_{matched_service}{breach_suffix}"
-            new_sub = f"📦 DELIVERY: {matched_service}{veh_tag}{plate_tag}"
-    elif initial_category == "vehicle":
-        plate_tag = f" [PLATE: {license_plate}]" if license_plate else " [NO PLATE VIEW]"
-        desc_label = vehicle_desc if vehicle_desc else initial_sub
-        new_sub = f"🚗 {desc_label}{plate_tag}"
-        if license_plate:
-            base_slot = initial_label.replace("_BREACH", "")
-            breach_suffix = "_BREACH" if initial_label.endswith("_BREACH") else ""
-            new_label = f"{base_slot}_{license_plate.replace(' ', '')}{breach_suffix}"
-    elif bio_result and bio_result.get("name"):
-        bname, brole, bsightings = bio_result["name"], bio_result["role"], bio_result.get("sightings", 1)
-        base_slot = initial_label.split("_")[0] + "_" + initial_label.split("_")[1] if "_" in initial_label else "Motion_1"
-        breach_suffix = "_BREACH" if (initial_label.endswith("_BREACH") and brole != "whitelist") else ""
-        new_label = f"{base_slot}_{bname}{breach_suffix}"
-        new_sub = f"ID: {bname} ({bsightings}x)" if brole == "visitor" else (f"⚠️ WATCHLIST: {bname}" if brole in ("watchlist", "watchlist_auto") else f"ID: {bname}")
+            if chosen_vlm and img_to_send and os.path.exists(img_to_send):
+                try:
+                    with open(img_to_send, "rb") as f:
+                        b64_img = base64.b64encode(f.read()).decode("utf-8")
 
-    attr_parts = [snap_id] if snap_id else []
-    if vlm_summary:
-        attr_parts.append(vlm_summary)
+                    prompt = (
+                        f"Analyze this security camera image from '{ev.camera_id}' (initial detector guess: category={ev.category}, sub_type={ev.sub_type}). "
+                        f"USER TAUGHT RULES FOR THIS CAMERA: {lessons_text or 'None'}. "
+                        f"CONFIGURED DELIVERY/SERVICE RULES: {rules_text}. "
+                        "Note: grayscale images are infrared night vision on dry pavement. "
+                        "If a person is walking an animal on a sidewalk/leash, classify sub_type as 'dog' (never 'cat') and mention the owner/leash in summary. "
+                        "If a vehicle is visible, read any legible license plate into 'plate' (or 'NONE'). "
+                        f"If a delivery carrier or service crew (like LANDSCAPERS with mowers/blowers/vests/bandanas or AMAZON/UPS/FEDEX/USPS) is visible, set 'carrier' to one of {active_rule_names} (or 'NONE'). "
+                        "Respond ONLY with valid JSON: "
+                        '{"valid_target": true, "category": "person|delivery|vehicle|animal", '
+                        '"sub_type": "short label like dog, white suv, or person", '
+                        '"plate": "ABC1234 or NONE", '
+                        f'"carrier": "{"|".join(active_rule_names)}|NONE", '
+                        '"summary": "Concise 12-20 word tactical description of subject, clothing/gear, or vehicle"}'
+                    )
 
-    async with _AsyncSessionLocal() as session:
-        await session.execute(
-            _update(_DetectionEvent)
-            .where(_DetectionEvent.id == event_id)
-            .values(category=new_category, sub_type=new_sub[:120], full_label=new_label[:120], attributes=" | ".join(attr_parts)[:250])
-        )
-        await session.commit()
+                    async with httpx.AsyncClient(timeout=35.0) as client:
+                        resp = await client.post(
+                            f"{WORKSTATION_GPU_URL}/api/generate",
+                            json={
+                                "model": chosen_vlm,
+                                "prompt": prompt,
+                                "images": [b64_img],
+                                "format": "json",
+                                "stream": False,
+                                "options": {"temperature": 0.1},
+                            },
+                        )
+                        if resp.status_code == 200:
+                            parsed = extract_json_dict(resp.json().get("response", "{}"))
+                            summary = (parsed.get("summary") or "").strip()
+                            carrier = (parsed.get("carrier") or "NONE").strip().upper()
+                            plate = (parsed.get("plate") or "NONE").strip().upper()
+                            vlm_sub = (parsed.get("sub_type") or "").strip().lower()
+
+                            if plate in ("NONE", "N/A", "UNKNOWN", "NULL", ""):
+                                plate = ""
+
+                            rule_map = {r["id"]: r for r in rules}
+                            if carrier in rule_map and face_role != "whitelist":
+                                rule = rule_map[carrier]
+                                _record_delivery_sighting(carrier, _dt.now(_tz.utc).isoformat())
+                                if face_info and face_info.get("auto_enrolled") and str(face_info.get("name", "")).startswith("VISITOR_"):
+                                    await session.execute(delete(_KnownFace).where(_KnownFace.name == face_info["name"]))
+                                ev.category = "delivery"
+                                plate_str = f" [PLATE: {plate}]" if plate else ""
+                                if rule.get("alert_mode") == "silent":
+                                    ev.sub_type = f"🔇 SERVICE: {carrier}{plate_str}"
+                                    ev.full_label = f"{ev.motion_slot}_SERVICE_{carrier}"
+                                else:
+                                    ev.sub_type = f"📦 DELIVERY: {carrier}{plate_str}"
+                                    ev.full_label = f"{ev.motion_slot}_DELIVERY_{carrier}"
+                            elif ev.category == "animal":
+                                if "dog" in vlm_sub or "dog" in summary.lower() or "leash" in summary.lower():
+                                    ev.sub_type = "dog"
+                                    ev.full_label = f"{ev.motion_slot}_dog"
+                                elif vlm_sub and vlm_sub not in ("none", "animal", "unknown"):
+                                    ev.sub_type = vlm_sub[:32]
+                            elif ev.category == "vehicle":
+                                plate_str = f" [PLATE: {plate}]" if plate else " [NO PLATE VIEW]"
+                                desc = vlm_sub.upper() if vlm_sub and vlm_sub != "none" else (ev.sub_type or "VEHICLE")
+                                ev.sub_type = f"🚗 {desc}{plate_str}"[:120]
+                                if plate:
+                                    ev.full_label = f"{ev.motion_slot}_{plate.replace(' ', '')}"[:120]
+
+                            face_prefix = f"🧬 [{recognized_face}] " if recognized_face else ""
+                            if summary:
+                                ai_notes_out = f"{face_prefix}[RTX 3060 Ti // {chosen_vlm}] {summary}"
+                except Exception as e:
+                    print(f"[DEEP INSPECT VLM ERROR] {e}")
+
+            if not ai_notes_out and recognized_face:
+                ai_notes_out = f"🧬 [BIOMETRIC MATCH: {recognized_face}]"
+
+            ev.attributes = f"{snap_id}|{ai_notes_out}"[:250] if (snap_id and ai_notes_out) else (snap_id or ai_notes_out)[:250]
+            await session.commit()
+
+            return {
+                "id": ev.id,
+                "category": ev.category,
+                "sub_type": ev.sub_type,
+                "full_label": ev.full_label,
+                "attributes": ev.attributes,
+                "ai_notes": ai_notes_out,
+            }

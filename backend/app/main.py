@@ -585,3 +585,63 @@ async def api_upsert_delivery_rule(payload: dict):
 async def api_delete_delivery_rule(rule_id: str):
     rules = delete_delivery_rule(rule_id)
     return {"rules": rules}
+
+# --- v7.1 Teach / Correct AI Endpoint & Inspect Fix ---
+from sqlalchemy import select as _main_select, update as _main_update
+from app.db.session import AsyncSessionLocal as _MainAsyncSessionLocal
+from app.db.models import DetectionEvent as _MainDetectionEvent
+from app.services.ai_lessons import add_ai_lesson, get_ai_lessons
+
+
+@app.get("/api/ai-lessons")
+async def api_get_ai_lessons():
+    return {"lessons": get_ai_lessons()}
+
+
+@app.post("/api/detections/{event_id}/teach")
+async def api_teach_detection(event_id: int, payload: dict):
+    correct_category = (payload.get("category") or "animal").strip().lower()
+    correct_sub_type = (payload.get("sub_type") or "dog").strip()
+    note = (payload.get("note") or "").strip()
+
+    async with _MainAsyncSessionLocal() as session:
+        res = await session.execute(_main_select(_MainDetectionEvent).where(_MainDetectionEvent.id == event_id))
+        ev = res.scalar_one_or_none()
+        if not ev:
+            return {"error": "Event not found"}
+
+        wrong_sub = ev.sub_type or ev.category
+        snap_id = (ev.attributes or "").split("|")[0].strip()
+        slot_prefix = (ev.full_label or "Motion_1").split("_")[0] + "_" + ((ev.full_label or "Motion_1").split("_")[1] if "_" in (ev.full_label or "") else "1")
+        new_label = f"{slot_prefix}_{correct_sub_type.replace(' ', '_')}"
+        ai_note = f"[🎓 LEARNED CORRECTION] {note}" if note else f"[🎓 LEARNED CORRECTION] Corrected from '{wrong_sub}' to '{correct_sub_type}'"
+        new_attr = f"{snap_id}|{ai_note}" if snap_id else ai_note
+
+        await session.execute(
+            _main_update(_MainDetectionEvent)
+            .where(_MainDetectionEvent.id == event_id)
+            .values(
+                category=correct_category,
+                sub_type=correct_sub_type[:120],
+                full_label=new_label[:120],
+                attributes=new_attr[:250],
+            )
+        )
+        await session.commit()
+
+        lessons = add_ai_lesson(
+            camera_id=ev.camera_id,
+            wrong_sub_type=wrong_sub,
+            correct_category=correct_category,
+            correct_sub_type=correct_sub_type,
+            note=note or f"Corrected {wrong_sub} to {correct_sub_type}",
+        )
+        return {
+            "id": ev.id,
+            "category": correct_category,
+            "sub_type": correct_sub_type,
+            "full_label": new_label,
+            "attributes": new_attr,
+            "ai_notes": ai_note,
+            "lessons_count": len(lessons),
+        }

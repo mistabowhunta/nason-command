@@ -560,6 +560,11 @@ class EdgeCVEngine:
                 if not any(z["zone_type"] == "exclusion" and point_in_polygon(det["x"] + det["w"] / 2.0, det["y"] + det["h"] / 2.0, z["points"]) for z in cam_zones)
             ]
             candidate_detections = parked_registry.filter_and_lock_vehicles(candidate_detections)
+            # If YOLO sees a 'cat' when a person is in the frame (or on DRIVEWAY where dogs are walked on leashes), upgrade 'cat' -> 'dog'
+            has_person_in_frame = any(d["category"] == "person" for d in candidate_detections)
+            for d in candidate_detections:
+                if d["category"] == "animal" and d["sub_type"] == "cat" and (has_person_in_frame or stream_name == "annke_1"):
+                    d["sub_type"] = "dog"
             candidate_detections.sort(key=lambda d: d["area"], reverse=True)
 
             active_out, db_events = tracker.update(frame, candidate_detections, motion_boxes, cam_zones)

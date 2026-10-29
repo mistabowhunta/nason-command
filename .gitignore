@@ -13,3 +13,23 @@ backend/app/models_zoo/*.onnx
 *.onnx
 *.pt
 *.sh
+
+# Local AI agent & IDE workspace state
+*.md
+!README.md
+.vscode/
+.gemini/
+.antigravity/
+.agy/
+.env
+*.sh
+
+# Plaintext RTSP camera credentials (keep mediamtx.example.yml tracked)
+mediamtx/mediamtx.yml
+
+# Biometric face crops, taught AI lessons, & binary model weights
+backend/app/known_faces/*
+!backend/app/known_faces/.gitkeep
+backend/models/*.json
+backend/models/*.pt
+backend/models/*.onnx
