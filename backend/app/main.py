@@ -1,4 +1,3 @@
-from app.services.delivery_rules import get_delivery_rules, upsert_delivery_rule, delete_delivery_rule
 import asyncio
 import base64
 import glob
@@ -564,11 +563,12 @@ async def inspect_detection_endpoint(event_id: int):
 async def agent_command_endpoint(payload: AgentCommandDTO):
     return await process_command_prompt(payload.prompt)
 
+# --- v7 Delivery & Service Rules Endpoints ---
+from app.services.delivery_rules import get_delivery_rules, upsert_delivery_rule, delete_delivery_rule
 
 @app.get("/api/delivery-rules")
 async def api_get_delivery_rules():
     return {"rules": get_delivery_rules()}
-
 
 @app.post("/api/delivery-rules")
 async def api_upsert_delivery_rule(payload: dict):
@@ -580,7 +580,6 @@ async def api_upsert_delivery_rule(payload: dict):
     cues = payload.get("cues", "")
     rules = upsert_delivery_rule(name=name, kind=kind, alert_mode=alert_mode, cues=cues)
     return {"rules": rules}
-
 
 @app.delete("/api/delivery-rules/{rule_id}")
 async def api_delete_delivery_rule(rule_id: str):

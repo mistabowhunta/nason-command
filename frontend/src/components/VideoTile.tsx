@@ -43,6 +43,12 @@ const CATEGORY_THEME: Record<
     badge: 'bg-sky-950/90 text-sky-300 border-sky-400/60',
     stroke: '#38bdf8',
   },
+  delivery: {
+    bracket: 'border-amber-400',
+    fill: 'bg-amber-400/15 border-amber-400/40',
+    badge: 'bg-amber-950/90 text-amber-300 border-amber-400/60',
+    stroke: '#fbbf24',
+  },
   animal: {
     bracket: 'border-amber-400',
     fill: 'bg-amber-400/10 border-amber-400/30',

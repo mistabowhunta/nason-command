@@ -2,7 +2,7 @@ import json
 import os
 import threading
 
-RULES_FILE = "/app/app/known_faces/delivery_rules.json"
+RULES_FILE = "/tmp/command_faces/delivery_rules.json"
 _lock = threading.Lock()
 
 DEFAULT_RULES = [
@@ -53,27 +53,36 @@ DEFAULT_RULES = [
     },
 ]
 
+_MEM_RULES = [dict(r) for r in DEFAULT_RULES]
+
 
 def get_delivery_rules() -> list[dict]:
+    global _MEM_RULES
     with _lock:
-        if not os.path.exists(RULES_FILE):
-            os.makedirs(os.path.dirname(RULES_FILE), exist_ok=True)
-            with open(RULES_FILE, "w") as f:
-                json.dump(DEFAULT_RULES, f, indent=2)
-            return list(DEFAULT_RULES)
         try:
+            if not os.path.exists(RULES_FILE):
+                os.makedirs(os.path.dirname(RULES_FILE), exist_ok=True)
+                with open(RULES_FILE, "w") as f:
+                    json.dump(_MEM_RULES, f, indent=2)
+                return list(_MEM_RULES)
             with open(RULES_FILE, "r") as f:
-                return json.load(f)
+                _MEM_RULES = json.load(f)
+                return list(_MEM_RULES)
         except Exception:
-            return list(DEFAULT_RULES)
+            return list(_MEM_RULES)
 
 
 def save_delivery_rules(rules: list[dict]) -> list[dict]:
+    global _MEM_RULES
     with _lock:
-        os.makedirs(os.path.dirname(RULES_FILE), exist_ok=True)
-        with open(RULES_FILE, "w") as f:
-            json.dump(rules, f, indent=2)
-        return rules
+        _MEM_RULES = [dict(r) for r in rules]
+        try:
+            os.makedirs(os.path.dirname(RULES_FILE), exist_ok=True)
+            with open(RULES_FILE, "w") as f:
+                json.dump(_MEM_RULES, f, indent=2)
+        except Exception:
+            pass
+        return list(_MEM_RULES)
 
 
 def upsert_delivery_rule(name: str, kind: str = "carrier", alert_mode: str = "alert", cues: str = "") -> list[dict]:

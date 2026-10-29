@@ -33,11 +33,13 @@ const CAM_NAMES: Record<string, string> = {
 const BADGE_COLORS: Record<string, string> = {
   person: 'bg-red-950 text-red-300 border-red-500/50',
   vehicle: 'bg-sky-950 text-sky-300 border-sky-400/50',
+  delivery: 'bg-amber-950 text-amber-300 border-amber-400/60',
   animal: 'bg-amber-950 text-amber-300 border-amber-400/50',
 };
 
 export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = false }: EvidenceRailProps) {
   const [events, setEvents] = useState<PersistedDetectionEvent[]>([]);
+  const [catFilter, setCatFilter] = useState<string>('ALL');
   const [selectedEvent, setSelectedEvent] = useState<PersistedDetectionEvent | null>(null);
   const [viewMode, setViewMode] = useState<'clip' | 'still'>('clip');
   const [showSnapshotBbox, setShowSnapshotBbox] = useState<boolean>(true);
@@ -206,6 +208,21 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
             </button>
           )}
         </div>
+      <div className="px-2.5 py-1.5 border-b border-zinc-800/80 bg-zinc-950/60 flex items-center gap-1 overflow-x-auto">
+        {(['ALL', 'person', 'delivery', 'vehicle', 'animal'] as const).map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setCatFilter(cat)}
+            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase cursor-pointer border ${
+              catFilter === cat
+                ? 'bg-emerald-950 text-emerald-300 border-emerald-500/60'
+                : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+            }`}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
 
         <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
           {events.length === 0 ? (
@@ -213,7 +230,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
               AWAITING TARGET DETECTIONS...
             </div>
           ) : (
-            events.map((ev) => {
+            events.filter((e) => catFilter === 'ALL' || e.category === catFilter).map((ev) => {
               const isRecognizedFace = (ev.sub_type || '').startsWith('ID:');
               const isWatchlist = (ev.sub_type || '').includes('WATCHLIST');
               const badge = isWatchlist

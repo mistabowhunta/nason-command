@@ -275,7 +275,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="grid items-start grid-cols-1 md:grid-cols-3 gap-3">
             <div>
               <label className="text-[10px] text-zinc-400 block mb-1">1. SUBJECT NAME / LABEL:</label>
               <input
@@ -289,7 +289,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
 
             <div>
               <label className="text-[10px] text-zinc-400 block mb-1">2. SECURITY ROLE:</label>
-              <div className="grid grid-cols-2 gap-1.5">
+              <div className="grid items-start grid-cols-2 gap-1.5">
                 <button
                   type="button"
                   onClick={() => setImportRole('whitelist')}
@@ -413,7 +413,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
           No active face vectors in this view. ({autoWatchlistCount} background FBI/DOC vectors are armed in RAM with 0 sightings).
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+        <div className="grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           <DeliveryRulesPanel />
           {pagedFaces.map((face) => {
             const style = ROLE_STYLES[face.role] || ROLE_STYLES.whitelist;
@@ -473,7 +473,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
                       onChange={(e) => setEditName(e.target.value)}
                       className="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 uppercase"
                     />
-                    <div className="grid grid-cols-3 gap-1">
+                    <div className="grid items-start grid-cols-3 gap-1">
                       {(['whitelist', 'visitor', 'watchlist'] as const).map((r) => (
                         <button
                           key={r}

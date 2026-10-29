@@ -1,6 +1,6 @@
 export interface BoundingBoxDetection {
   slot: string;
-  category: 'person' | 'vehicle' | 'animal';
+  category: 'person' | 'delivery' | 'vehicle' | 'animal';
   sub_type: string;
   attributes: string;
   full_label: string;
