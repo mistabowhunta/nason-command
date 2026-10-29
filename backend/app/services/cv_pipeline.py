@@ -166,7 +166,7 @@ class ParkedVehicleRegistry:
                     matched_fp[k] = matched_fp[k] * 0.85 + det[k] * 0.15
                 matched_fp["last_seen"] = now
                 matched_fp["sightings"] += 1
-                det["is_parked_vehicle"] = matched_fp["sightings"] >= 3
+                det["is_parked_vehicle"] = matched_fp["sightings"] >= 6
             else:
                 self.parked_footprints.append({
                     "x": det["x"], "y": det["y"], "w": det["w"], "h": det["h"], "last_seen": now, "sightings": 1
@@ -322,7 +322,7 @@ class TrueDisplacementTracker:
 
             oldest_cx, oldest_cy, _, _ = hist[0]
             net_disp = math.hypot(tr["cx"] - oldest_cx, tr["cy"] - oldest_cy)
-            if net_disp < (0.080 if det["category"] == "vehicle" else 0.022) or det.get("step_disp", 0.0) < (0.016 if det["category"] == "vehicle" else 0.004):
+            if net_disp < (0.038 if det["category"] == "vehicle" else 0.022) or det.get("step_disp", 0.0) < (0.008 if det["category"] == "vehicle" else 0.004):
                 continue
 
             if det["category"] == "person":
@@ -513,10 +513,17 @@ class EdgeCVEngine:
             x2, y2 = int(min(1.0, ev["x"] + ev["w"] + pad_x) * fw), int(min(1.0, ev["y"] + ev["h"] + pad_y) * fh)
             crop = frame[y1:y2, x1:x2]
             if crop.size > 0:
-                cv2.imwrite(f"{SNAPSHOT_DIR}/crop_{snap_id}", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-            cv2.imwrite(f"{SNAPSHOT_DIR}/full_{snap_id}", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 84])
+                qual = 96 if ev["category"] == "vehicle" else 90
+                cv2.imwrite(f"{SNAPSHOT_DIR}/crop_{snap_id}", crop, [int(cv2.IMWRITE_JPEG_QUALITY), qual])
+                if ev["category"] == "vehicle":
+                    py1 = int(max(0.0, ev["y"] + ev["h"] * 0.30) * fh)
+                    py2 = int(min(1.0, ev["y"] + ev["h"] + pad_y) * fh)
+                    plate_crop = frame[py1:py2, x1:x2]
+                    if plate_crop.size > 0:
+                        cv2.imwrite(f"{SNAPSHOT_DIR}/plate_{snap_id}", plate_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+            cv2.imwrite(f"{SNAPSHOT_DIR}/full_{snap_id}", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 86])
             ev["attributes"] = snap_id
-            if ev["category"] in ("person", "animal"):
+            if ev["category"] in ("person", "vehicle", "delivery", "animal"):
                 encode_mp4_replay_async(grabber, snap_id, now_ts)
 
     def _worker(self, stream_name: str):

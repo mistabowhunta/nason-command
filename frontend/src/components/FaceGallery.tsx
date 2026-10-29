@@ -1,3 +1,4 @@
+import { DeliveryRulesPanel } from './DeliveryRulesPanel';
 import React, { useEffect, useState } from 'react';
 import type { KnownFaceItem } from '../types/telemetry';
 import {
@@ -413,6 +414,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <DeliveryRulesPanel />
           {pagedFaces.map((face) => {
             const style = ROLE_STYLES[face.role] || ROLE_STYLES.whitelist;
             const isWhitelisted = face.role === 'whitelist';
