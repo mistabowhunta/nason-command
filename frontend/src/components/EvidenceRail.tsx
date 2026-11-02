@@ -36,11 +36,39 @@ const BADGE_COLORS: Record<string, string> = {
   animal: 'bg-amber-950 text-amber-300 border-amber-400/50',
 };
 
+const TEACH_PRESETS: Record<string, { label: string; value: string }[]> = {
+  animal: [
+    { label: '🐱 CAT', value: 'cat' },
+    { label: '🐶 DOG', value: 'dog' },
+    { label: '🐦 BIRD', value: 'bird' },
+    { label: '🦌 WILDLIFE', value: 'wildlife' },
+  ],
+  person: [
+    { label: '✅ ISAAC', value: 'ISAAC' },
+    { label: '✅ JENNIFER', value: 'JENNIFER' },
+    { label: '✅ BEAU', value: 'BEAU' },
+    { label: '👤 STRANGER', value: 'person' },
+  ],
+  delivery: [
+    { label: '📦 AMAZON', value: 'AMAZON' },
+    { label: '📦 UPS', value: 'UPS' },
+    { label: '📦 FEDEX', value: 'FEDEX' },
+    { label: '📦 USPS', value: 'USPS' },
+    { label: '🔇 LANDSCAPERS', value: 'LANDSCAPERS' },
+  ],
+  vehicle: [
+    { label: '🚗 CAR', value: 'car' },
+    { label: '🚙 SUV/VAN', value: 'suv/van' },
+    { label: '🛻 TRUCK', value: 'truck' },
+  ],
+};
+
 export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = false }: EvidenceRailProps) {
   const [events, setEvents] = useState<PersistedDetectionEvent[]>([]);
   const [catFilter, setCatFilter] = useState<string>('ALL');
+  const [fetchLimit, setFetchLimit] = useState<number>(60);
   const [selectedEvent, setSelectedEvent] = useState<PersistedDetectionEvent | null>(null);
-  const [viewMode, setViewMode] = useState<'clip' | 'still'>('clip');
+  const [viewMode, setViewMode] = useState<'clip' | 'still' | 'plate'>('clip');
   const [showSnapshotBbox, setShowSnapshotBbox] = useState<boolean>(true);
   const [inspectingId, setInspectingId] = useState<number | null>(null);
   const [enrollingId, setEnrollingId] = useState<number | null>(null);
@@ -49,14 +77,14 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
   const [enrollStatus, setEnrollStatus] = useState<string | null>(null);
   const [teachingId, setTeachingId] = useState<number | null>(null);
   const [teachCategory, setTeachCategory] = useState<string>('animal');
-  const [teachSubType, setTeachSubType] = useState<string>('dog');
-  const [teachNote, setTeachNote] = useState<string>('');
+  const [teachSubType, setTeachSubType] = useState<string>('cat');
   const [teachStatus, setTeachStatus] = useState<string | null>(null);
   const apiBase = `http://${hostIp}:8080`;
 
   const fetchEvents = async () => {
     try {
-      const res = await fetch(`${apiBase}/api/detections?limit=35`);
+      const catParam = catFilter !== 'ALL' ? `&category=${encodeURIComponent(catFilter)}` : '';
+      const res = await fetch(`${apiBase}/api/detections?limit=${fetchLimit}${catParam}`);
       if (res.ok) {
         const data: PersistedDetectionEvent[] = await res.json();
         setEvents(data);
@@ -70,7 +98,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
     fetchEvents();
     const timer = window.setInterval(fetchEvents, 2500);
     return () => window.clearInterval(timer);
-  }, [apiBase, refreshTrigger]);
+  }, [apiBase, refreshTrigger, catFilter, fetchLimit]);
 
   const handlePurgeAll = async () => {
     try {
@@ -84,23 +112,22 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
     }
   };
 
-  const handleTeachSubmit = async (e: React.FormEvent, evId: number) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setTeachStatus('Saving lesson to AI memory...');
+  const submitTeachCorrection = async (evId: number, category: string, subType: string) => {
+    setTeachCategory(category);
+    setTeachSubType(subType);
+    setTeachStatus(`Saving ${subType.toUpperCase()}...`);
     try {
       const res = await fetch(`${apiBase}/api/detections/${evId}/teach`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          category: teachCategory,
-          sub_type: teachSubType.trim() || teachCategory,
-          note: teachNote.trim(),
+          category,
+          sub_type: subType.trim() || category,
         }),
       });
       const data = await res.json();
       if (res.ok && !data.error) {
-        setTeachStatus('Learned! Saved to AI memory.');
+        setTeachStatus(`Saved: ${data.sub_type}`);
         setEvents((prev) =>
           prev.map((item) =>
             item.id === evId
@@ -109,7 +136,6 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                   category: data.category,
                   sub_type: data.sub_type,
                   full_label: data.full_label,
-                  attributes: data.attributes,
                   ai_notes: data.ai_notes,
                 }
               : item
@@ -118,13 +144,19 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
         window.setTimeout(() => {
           setTeachingId(null);
           setTeachStatus(null);
-        }, 900);
+        }, 700);
       } else {
         setTeachStatus(data.error || 'Failed to save lesson');
       }
     } catch {
       setTeachStatus('Network error saving lesson');
     }
+  };
+
+  const handleTeachSubmit = async (e: React.FormEvent, evId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    await submitTeachCorrection(evId, teachCategory, teachSubType);
   };
 
   const handleEnrollFace = async (e: React.FormEvent, evId: number) => {
@@ -237,23 +269,38 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
           fullWidthMobile ? 'w-full' : 'w-80 border-l border-zinc-800 h-[calc(100vh-105px)] sticky top-[53px]'
         } bg-zinc-900/60 flex flex-col`}
       >
-        <div className="px-3 py-3 border-b border-zinc-800 flex items-center justify-between">
+        <div className="px-3 py-2.5 border-b border-zinc-800 flex items-center justify-between gap-1">
           <div className="flex items-center gap-1.5">
             <Eye className="w-4 h-4 text-emerald-400" />
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-200">
               KILL-FEED ({events.length})
             </span>
           </div>
-          {events.length > 0 && (
-            <button
-              onClick={handlePurgeAll}
-              title="Wipe snapshots & clips (Face IDs are preserved)"
-              className="text-[10px] font-mono bg-red-950/80 hover:bg-red-900 text-red-300 border border-red-500/40 px-2 py-0.5 rounded flex items-center gap-1 cursor-pointer"
-            >
-              <Trash2 className="w-3 h-3" />
-              PURGE
-            </button>
-          )}
+          <div className="flex items-center gap-1">
+            {([60, 200, 600] as const).map((lim) => (
+              <button
+                key={lim}
+                onClick={() => setFetchLimit(lim)}
+                title={`Show up to ${lim} database events`}
+                className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold cursor-pointer border ${
+                  fetchLimit === lim
+                    ? 'bg-emerald-950 text-emerald-300 border-emerald-500/60'
+                    : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                }`}
+              >
+                {lim === 600 ? 'ALL' : lim}
+              </button>
+            ))}
+            {events.length > 0 && (
+              <button
+                onClick={handlePurgeAll}
+                title="Wipe snapshots & clips (Face IDs are preserved)"
+                className="text-[10px] font-mono bg-red-950/80 hover:bg-red-900 text-red-300 border border-red-500/40 px-1.5 py-0.5 rounded flex items-center gap-0.5 cursor-pointer"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            )}
+          </div>
         </div>
       <div className="px-2.5 py-1.5 border-b border-zinc-800/80 bg-zinc-950/60 flex items-center gap-1 overflow-x-auto">
         {(['ALL', 'person', 'delivery', 'vehicle', 'animal'] as const).map((cat) => (
@@ -327,6 +374,11 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                       ) : (
                         <Camera className="w-5 h-5 text-zinc-700" />
                       )}
+                      {ev.plate_url && (
+                        <span className="absolute top-0.5 left-0.5 bg-sky-600/95 text-white text-[8px] font-mono font-bold px-1 rounded-xs">
+                          PLATE
+                        </span>
+                      )}
                       {ev.clip_url && (
                         <span className="absolute bottom-0.5 right-0.5 bg-emerald-600/95 text-white text-[8px] font-mono font-bold px-1 rounded-xs flex items-center gap-0.5">
                           <Film className="w-2.5 h-2.5" />
@@ -346,7 +398,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                         </span>
                       </div>
                       <div className="text-xs text-zinc-200 truncate mt-1 font-semibold">
-                        {ev.full_label}
+                        #{ev.id} · {ev.full_label}
                       </div>
                       <div className="flex items-center justify-between mt-1 gap-1">
                         <span className="text-[10px] text-zinc-400 uppercase font-bold">
@@ -360,7 +412,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                                 setEnrollingId(enrollingId === ev.id ? null : ev.id);
                                 setEnrollStatus(null);
                               }}
-                              title="Enroll this person's face into YuNet + SFace"
+                              title="Enroll or label this person's face"
                               className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-sky-950/90 hover:bg-sky-900 text-sky-300 border border-sky-500/40 flex items-center gap-1 cursor-pointer"
                             >
                               <UserCheck className="w-2.5 h-2.5" />
@@ -374,13 +426,13 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                                   setTeachingId(null);
                                 } else {
                                   setTeachingId(ev.id);
-                                  setTeachCategory(ev.category || 'animal');
-                                  setTeachSubType(ev.sub_type === 'cat' ? 'dog' : (ev.sub_type || 'dog'));
-                                  setTeachNote('');
+                                  const initCat = ev.category || 'animal';
+                                  setTeachCategory(initCat);
+                                  setTeachSubType(initCat === 'animal' ? 'cat' : initCat === 'person' ? 'ISAAC' : initCat);
                                   setTeachStatus(null);
                                 }
                               }}
-                              title="Correct a misidentification and teach the AI model"
+                              title="1-click correction (no typing required)"
                               className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-950/90 hover:bg-amber-900 text-amber-300 border border-amber-500/40 flex items-center gap-1 cursor-pointer"
                             >
                               🎓 TEACH
@@ -394,48 +446,52 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                 <form
                   onSubmit={(e) => handleTeachSubmit(e, ev.id)}
                   onClick={(e) => e.stopPropagation()}
-                  className="mt-2 p-2 rounded bg-zinc-950 border border-amber-500/40 space-y-1.5"
+                  className="mt-2 p-2 rounded bg-zinc-950 border border-amber-500/40 space-y-2"
                 >
-                  <div className="text-[10px] font-mono font-bold text-amber-300">
-                    🎓 TEACH / CORRECT AI MODEL
-                  </div>
-                  <div className="flex gap-1.5">
-                    <select
-                      value={teachCategory}
-                      onChange={(e) => setTeachCategory(e.target.value)}
-                      className="bg-zinc-900 border border-zinc-700 rounded px-1.5 py-1 text-[10px] font-mono text-zinc-200"
-                    >
-                      <option value="animal">animal</option>
-                      <option value="person">person</option>
-                      <option value="delivery">delivery</option>
-                      <option value="vehicle">vehicle</option>
-                    </select>
-                    <input
-                      type="text"
-                      value={teachSubType}
-                      onChange={(e) => setTeachSubType(e.target.value)}
-                      placeholder="True object (e.g. dog)"
-                      className="flex-1 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-[10px] font-mono text-zinc-100"
-                    />
-                  </div>
-                  <input
-                    type="text"
-                    value={teachNote}
-                    onChange={(e) => setTeachNote(e.target.value)}
-                    placeholder="Context (e.g. Black & white dog walked by owner with leash)"
-                    className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-[10px] font-mono text-zinc-100"
-                  />
-                  <div className="flex items-center justify-between gap-2 pt-0.5">
-                    <span className="text-[10px] font-mono text-amber-300/90 truncate">
-                      {teachStatus || 'Saves rule to persistent AI memory'}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-mono font-bold text-amber-300">
+                      🎓 1-CLICK CORRECTION:
                     </span>
-                    <button
-                      type="submit"
-                      className="px-2.5 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-mono font-bold text-[10px] cursor-pointer shrink-0"
-                    >
-                      SAVE & TEACH
-                    </button>
+                    <div className="flex gap-1">
+                      {(['animal', 'person', 'delivery', 'vehicle'] as const).map((catOpt) => (
+                        <button
+                          key={catOpt}
+                          type="button"
+                          onClick={() => {
+                            setTeachCategory(catOpt);
+                            const firstPreset = TEACH_PRESETS[catOpt]?.[0]?.value || catOpt;
+                            setTeachSubType(firstPreset);
+                          }}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-mono uppercase font-bold cursor-pointer border ${
+                            teachCategory === catOpt
+                              ? 'bg-amber-500 text-black border-amber-300'
+                              : 'bg-zinc-900 text-zinc-400 border-zinc-700 hover:text-zinc-200'
+                          }`}
+                        >
+                          {catOpt}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(TEACH_PRESETS[teachCategory] || TEACH_PRESETS.animal).map((preset) => (
+                      <button
+                        key={preset.value}
+                        type="button"
+                        onClick={() => submitTeachCorrection(ev.id, teachCategory, preset.value)}
+                        className="px-2 py-1.5 rounded bg-zinc-900 hover:bg-amber-500 hover:text-black text-zinc-100 border border-zinc-700 hover:border-amber-300 font-mono font-bold text-[10px] cursor-pointer text-left truncate transition-colors"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {teachStatus && (
+                    <div className="text-[10px] font-mono text-amber-300 truncate pt-0.5">
+                      {teachStatus}
+                    </div>
+                  )}
                 </form>
               )}
               {enrollingId === ev.id && (
@@ -445,7 +501,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                       className="bg-zinc-900 border border-sky-500/50 rounded p-2 flex flex-col gap-1.5 font-mono"
                     >
                       <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-sky-300 font-bold">ENROLL 128-D SFACE:</span>
+                        <span className="text-[10px] text-sky-300 font-bold">ENROLL / ID PERSON:</span>
                         <div className="flex gap-1">
                           <button
                             type="button"
@@ -477,7 +533,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                           type="text"
                           value={faceNameInput}
                           onChange={(e) => setFaceNameInput(e.target.value)}
-                          placeholder="ISAAC, JENNIFER, PROWLER..."
+                          placeholder="ISAAC, JENNIFER, BEAU..."
                           className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 uppercase"
                         />
                         <button
@@ -489,7 +545,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                         </button>
                       </div>
                       <div className="flex gap-1">
-                        {['ISAAC', 'JENNIFER', 'USPS_DRIVER'].map((preset) => (
+                        {['ISAAC', 'JENNIFER', 'BEAU'].map((preset) => (
                           <button
                             key={preset}
                             type="button"
@@ -521,6 +577,14 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
               );
             })
           )}
+          {events.length >= fetchLimit && (
+            <button
+              onClick={() => setFetchLimit((prev) => Math.min(prev + 150, 1000))}
+              className="w-full py-2 rounded bg-zinc-950 hover:bg-zinc-800 border border-zinc-700 text-emerald-300 text-[10px] font-mono font-bold uppercase cursor-pointer"
+            >
+              LOAD OLDER DATABASE EVENTS (+150)
+            </button>
+          )}
         </div>
       </aside>
 
@@ -539,7 +603,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                   EVENT #{selectedEvent.id}
                 </span>
                 <span className="text-xs text-zinc-200 font-bold">
-                  {CAM_NAMES[selectedEvent.camera_id] || selectedEvent.camera_id} // {selectedEvent.full_label}
+                  {CAM_NAMES[selectedEvent.camera_id] || selectedEvent.camera_id} // {selectedEvent.sub_type || selectedEvent.full_label}
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-1.5">
@@ -554,6 +618,18 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                   >
                     {viewMode === 'clip' ? <ImageIcon className="w-3 h-3" /> : <Film className="w-3 h-3" />}
                     {viewMode === 'clip' ? 'VIEW STILL + BBOX' : '🎬 5s MP4 REPLAY'}
+                  </button>
+                )}
+                {selectedEvent.plate_url && (
+                  <button
+                    onClick={() => setViewMode(viewMode === 'plate' ? 'still' : 'plate')}
+                    className={`px-2 py-1 rounded text-[11px] font-mono font-bold border flex items-center gap-1 cursor-pointer ${
+                      viewMode === 'plate'
+                        ? 'bg-sky-600 text-white border-sky-400'
+                        : 'bg-zinc-900 text-sky-300 border-zinc-700'
+                    }`}
+                  >
+                    🔢 {viewMode === 'plate' ? 'FULL FRAME' : 'PLATE CROP'}
                   </button>
                 )}
                 {selectedEvent.crop_url && (
@@ -638,6 +714,12 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                   autoPlay
                   loop
                   playsInline
+                  className="w-full h-full object-contain"
+                />
+              ) : viewMode === 'plate' && selectedEvent.plate_url ? (
+                <img
+                  src={`${apiBase}${selectedEvent.plate_url}`}
+                  alt="High-res bumper & license plate crop"
                   className="w-full h-full object-contain"
                 />
               ) : selectedEvent.full_url ? (

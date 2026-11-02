@@ -66,6 +66,7 @@ export interface PersistedDetectionEvent {
   bbox_h: number;
   crop_url: string | null;
   full_url: string | null;
+  plate_url?: string | null;
   clip_url?: string | null;
   ai_notes?: string | null;
 }

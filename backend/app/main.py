@@ -353,8 +353,16 @@ async def enroll_face_from_detection(event_id: int, payload: EnrollFaceDTO):
         if not ev or not ev.attributes:
             raise HTTPException(status_code=404, detail="Detection snapshot not found")
 
-        crop_path = f"{SNAPSHOT_DIR}/crop_{ev.attributes}"
-        full_path = f"{SNAPSHOT_DIR}/full_{ev.attributes}"
+        snap_id = (ev.attributes or "").split("|")[0].strip()
+        crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}"
+        full_path = f"{SNAPSHOT_DIR}/full_{snap_id}"
+
+        # Clean up any auto-enrolled VISITOR_XX that was assigned to this event
+        old_sub = ev.sub_type or ""
+        if "VISITOR_" in old_sub:
+            for token in old_sub.replace("(", " ").replace(")", " ").split():
+                if token.startswith("VISITOR_"):
+                    await session.execute(delete(KnownFace).where(KnownFace.name == token))
 
         vec, _, face_crop = (None, 0.0, None)
         if os.path.exists(crop_path):
@@ -362,36 +370,38 @@ async def enroll_face_from_detection(event_id: int, payload: EnrollFaceDTO):
         if vec is None and os.path.exists(full_path):
             vec, _, face_crop = face_engine.extract_face_data(cv2.imread(full_path))
 
-        if vec is None:
-            raise HTTPException(
-                status_code=422,
-                detail="YuNet could not isolate a clear face in this snapshot. Try a closer front/angled frame.",
-            )
-
-        persistent_fname = f"enrolled_{clean_name}_{int(time.time() * 1000)}.jpg"
-        if face_crop is not None:
-            cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-        elif os.path.exists(crop_path):
-            cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", cv2.imread(crop_path))
-
-        row = KnownFace(
-            name=clean_name,
-            role=payload.role,
-            embedding_json=json.dumps(vec.tolist()),
-            sample_crop=f"/face_crops/{persistent_fname}",
-            sightings=1,
-            last_seen=datetime.now(timezone.utc),
-        )
-        session.add(row)
-
         ev.sub_type = f"⚠️ WATCHLIST: {clean_name}" if payload.role == "watchlist" else f"ID: {clean_name}"
         ev.full_label = f"{ev.motion_slot}_{clean_name}"
-        ev.ai_notes = f"🧬 [ENROLLED {payload.role.upper()}: {clean_name}] {ev.ai_notes or ''}"
+
+        if vec is not None:
+            persistent_fname = f"enrolled_{clean_name}_{int(time.time() * 1000)}.jpg"
+            if face_crop is not None:
+                cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            elif os.path.exists(crop_path):
+                cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", cv2.imread(crop_path))
+
+            row = KnownFace(
+                name=clean_name,
+                role=payload.role,
+                embedding_json=json.dumps(vec.tolist()),
+                sample_crop=f"/face_crops/{persistent_fname}",
+                sightings=1,
+                last_seen=datetime.now(timezone.utc),
+            )
+            session.add(row)
+            ai_note = f"🧬 [ENROLLED {payload.role.upper()}: {clean_name}]"
+            status_str = "ENROLLED"
+        else:
+            ai_note = f"🏷️ [LABELED {clean_name} — Face angled/distant, linked to {clean_name}]"
+            status_str = "LABELED_NO_VECTOR"
+
+        ev.ai_notes = ai_note
+        ev.attributes = f"{snap_id}|{ai_note}"[:250] if snap_id else ai_note[:250]
         await session.commit()
 
     await face_engine.sync_gallery_from_db_and_disk()
     return {
-        "status": "ENROLLED",
+        "status": status_str,
         "name": clean_name,
         "sub_type": ev.sub_type,
         "full_label": ev.full_label,
@@ -503,19 +513,23 @@ async def get_camera_heatmap(camera_id: str):
 
 
 @app.get("/api/detections")
-async def get_recent_detections(limit: int = 35):
+async def get_recent_detections(limit: int = 60, category: str | None = None, camera_id: str | None = None):
     async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(DetectionEvent).order_by(DetectionEvent.timestamp.desc()).limit(limit)
-        )
+        stmt = select(DetectionEvent).order_by(DetectionEvent.timestamp.desc())
+        if category and category.upper() != "ALL":
+            stmt = stmt.where(DetectionEvent.category == category.lower())
+        if camera_id and camera_id.upper() != "ALL":
+            stmt = stmt.where(DetectionEvent.camera_id == camera_id.lower())
+        stmt = stmt.limit(min(max(1, limit), 1000))
+        result = await session.execute(stmt)
         rows = result.scalars().all()
         out = []
         for r in rows:
-            clip_exists = (
-                r.attributes
-                and r.category in ("person", "animal")
-                and os.path.exists(f"{SNAPSHOT_DIR}/clip_{r.attributes}.mp4")
-            )
+            raw_attr = r.attributes or ""
+            snap_id = raw_attr.split("|")[0].strip()
+            pipe_note = raw_attr.split("|", 1)[1].strip() if "|" in raw_attr else None
+            clip_exists = bool(snap_id and os.path.exists(f"{SNAPSHOT_DIR}/clip_{snap_id}.mp4"))
+            plate_exists = bool(snap_id and os.path.exists(f"{SNAPSHOT_DIR}/plate_{snap_id}"))
             out.append({
                 "id": r.id,
                 "timestamp": r.timestamp.isoformat(),
@@ -528,10 +542,11 @@ async def get_recent_detections(limit: int = 35):
                 "bbox_y": r.bbox_y,
                 "bbox_w": r.bbox_w,
                 "bbox_h": r.bbox_h,
-                "crop_url": f"/snapshots/crop_{r.attributes}" if r.attributes else None,
-                "full_url": f"/snapshots/full_{r.attributes}" if r.attributes else None,
-                "clip_url": f"/snapshots/clip_{r.attributes}.mp4" if clip_exists else None,
-                "ai_notes": r.ai_notes,
+                "crop_url": f"/snapshots/crop_{snap_id}" if snap_id else None,
+                "full_url": f"/snapshots/full_{snap_id}" if snap_id else None,
+                "plate_url": f"/snapshots/plate_{snap_id}" if plate_exists else None,
+                "clip_url": f"/snapshots/clip_{snap_id}.mp4" if clip_exists else None,
+                "ai_notes": r.ai_notes or pipe_note,
             })
         return out
 
@@ -601,7 +616,7 @@ async def api_get_ai_lessons():
 @app.post("/api/detections/{event_id}/teach")
 async def api_teach_detection(event_id: int, payload: dict):
     correct_category = (payload.get("category") or "animal").strip().lower()
-    correct_sub_type = (payload.get("sub_type") or "dog").strip()
+    correct_sub_type = (payload.get("sub_type") or "cat").strip()
     note = (payload.get("note") or "").strip()
 
     async with _MainAsyncSessionLocal() as session:
@@ -612,36 +627,109 @@ async def api_teach_detection(event_id: int, payload: dict):
 
         wrong_sub = ev.sub_type or ev.category
         snap_id = (ev.attributes or "").split("|")[0].strip()
-        slot_prefix = (ev.full_label or "Motion_1").split("_")[0] + "_" + ((ev.full_label or "Motion_1").split("_")[1] if "_" in (ev.full_label or "") else "1")
-        new_label = f"{slot_prefix}_{correct_sub_type.replace(' ', '_')}"
-        ai_note = f"[🎓 LEARNED CORRECTION] {note}" if note else f"[🎓 LEARNED CORRECTION] Corrected from '{wrong_sub}' to '{correct_sub_type}'"
-        new_attr = f"{snap_id}|{ai_note}" if snap_id else ai_note
+        slot_prefix = ev.motion_slot or (
+            (ev.full_label or "Motion_1").split("_")[0]
+            + "_"
+            + ((ev.full_label or "Motion_1").split("_")[1] if "_" in (ev.full_label or "") else "1")
+        )
+
+        lessons = get_ai_lessons()
+        if correct_category == "person":
+            clean_person = correct_sub_type.replace("ID:", "").strip().upper()
+            if clean_person in ("PERSON", "STRANGER", "VISITOR", "UNKNOWN"):
+                final_sub = "person"
+                new_label = f"{slot_prefix}_person"
+                ai_note = f"[🎓 CORRECTION] Cleared ID '{wrong_sub}' -> Unknown Person"
+            else:
+                final_sub = f"ID: {clean_person}"
+                new_label = f"{slot_prefix}_{clean_person}"
+                # Also attempt biometric face enrollment if a clear face is present in this snapshot
+                crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}"
+                full_path = f"{SNAPSHOT_DIR}/full_{snap_id}"
+                vec, _, face_crop = (None, 0.0, None)
+                if snap_id and os.path.exists(crop_path):
+                    vec, _, face_crop = face_engine.extract_face_data(cv2.imread(crop_path))
+                if vec is None and snap_id and os.path.exists(full_path):
+                    vec, _, face_crop = face_engine.extract_face_data(cv2.imread(full_path))
+                if "VISITOR_" in wrong_sub:
+                    for token in wrong_sub.replace("(", " ").replace(")", " ").split():
+                        if token.startswith("VISITOR_"):
+                            await session.execute(delete(KnownFace).where(KnownFace.name == token))
+                if vec is not None:
+                    persistent_fname = f"enrolled_{clean_person}_{int(time.time() * 1000)}.jpg"
+                    if face_crop is not None:
+                        cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                    session.add(
+                        KnownFace(
+                            name=clean_person,
+                            role="whitelist",
+                            embedding_json=json.dumps(vec.tolist()),
+                            sample_crop=f"/face_crops/{persistent_fname}",
+                            sightings=1,
+                            last_seen=datetime.now(timezone.utc),
+                        )
+                    )
+                    ai_note = f"🧬 [ENROLLED WHITELIST: {clean_person}] Corrected from '{wrong_sub}'"
+                else:
+                    ai_note = f"🏷️ [LABELED: {clean_person}] Corrected from '{wrong_sub}'"
+        elif correct_category == "delivery":
+            clean_carrier = correct_sub_type.replace("📦 DELIVERY:", "").replace("🔇 SERVICE:", "").strip().upper()
+            rule_map = {r["id"]: r for r in get_delivery_rules()}
+            rule = rule_map.get(clean_carrier)
+            if rule and rule.get("alert_mode") == "silent":
+                final_sub = f"🔇 SERVICE: {clean_carrier}"
+                new_label = f"{slot_prefix}_SERVICE_{clean_carrier}"
+            else:
+                final_sub = f"📦 DELIVERY: {clean_carrier}"
+                new_label = f"{slot_prefix}_DELIVERY_{clean_carrier}"
+            ai_note = f"[🎓 LEARNED CORRECTION] Corrected '{wrong_sub}' -> '{clean_carrier}'"
+            lessons = add_ai_lesson(
+                camera_id=ev.camera_id,
+                wrong_sub_type=wrong_sub,
+                correct_category=correct_category,
+                correct_sub_type=clean_carrier,
+                note=note or f"Corrected {wrong_sub} to {clean_carrier}",
+            )
+        else:
+            final_sub = correct_sub_type.strip().lower()
+            new_label = f"{slot_prefix}_{final_sub.replace(' ', '_')}"
+            ai_note = (
+                f"[🎓 LEARNED CORRECTION] {note}"
+                if note
+                else f"[🎓 LEARNED CORRECTION] Corrected '{wrong_sub}' -> '{final_sub}'"
+            )
+            lessons = add_ai_lesson(
+                camera_id=ev.camera_id,
+                wrong_sub_type=wrong_sub,
+                correct_category=correct_category,
+                correct_sub_type=final_sub,
+                note=note or f"Corrected {wrong_sub} to {final_sub}",
+            )
+
+        new_attr = f"{snap_id}|{ai_note}"[:250] if snap_id else ai_note[:250]
 
         await session.execute(
             _main_update(_MainDetectionEvent)
             .where(_MainDetectionEvent.id == event_id)
             .values(
                 category=correct_category,
-                sub_type=correct_sub_type[:120],
-                full_label=new_label[:120],
+                sub_type=final_sub[:120],
+                full_label=new_label[:160],
                 attributes=new_attr[:250],
+                ai_notes=ai_note,
             )
         )
         await session.commit()
 
-        lessons = add_ai_lesson(
-            camera_id=ev.camera_id,
-            wrong_sub_type=wrong_sub,
-            correct_category=correct_category,
-            correct_sub_type=correct_sub_type,
-            note=note or f"Corrected {wrong_sub} to {correct_sub_type}",
-        )
-        return {
-            "id": ev.id,
-            "category": correct_category,
-            "sub_type": correct_sub_type,
-            "full_label": new_label,
-            "attributes": new_attr,
-            "ai_notes": ai_note,
-            "lessons_count": len(lessons),
-        }
+    if correct_category == "person":
+        await face_engine.sync_gallery_from_db_and_disk()
+
+    return {
+        "id": event_id,
+        "category": correct_category,
+        "sub_type": final_sub,
+        "full_label": new_label,
+        "attributes": new_attr,
+        "ai_notes": ai_note,
+        "lessons_count": len(lessons),
+    }

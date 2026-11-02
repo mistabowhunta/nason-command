@@ -365,19 +365,23 @@ async def deep_inspect_detection(event_id: int) -> dict:
             if chosen_vlm and img_to_send and os.path.exists(img_to_send):
                 try:
                     with open(img_to_send, "rb") as f:
-                        b64_img = base64.b64encode(f.read()).decode("utf-8")
+                        images_b64 = [base64.b64encode(f.read()).decode("utf-8")]
+                    if ev.category == "vehicle" and plate_path and os.path.exists(plate_path):
+                        with open(plate_path, "rb") as pf:
+                            images_b64.append(base64.b64encode(pf.read()).decode("utf-8"))
 
                     prompt = (
                         f"Analyze this security camera image from '{ev.camera_id}' (initial detector guess: category={ev.category}, sub_type={ev.sub_type}). "
                         f"USER TAUGHT RULES FOR THIS CAMERA: {lessons_text or 'None'}. "
                         f"CONFIGURED DELIVERY/SERVICE RULES: {rules_text}. "
                         "Note: grayscale images are infrared night vision on dry pavement. "
-                        "If a person is walking an animal on a sidewalk/leash, classify sub_type as 'dog' (never 'cat') and mention the owner/leash in summary. "
-                        "If a vehicle is visible, read any legible license plate into 'plate' (or 'NONE'). "
+                        "If a person is walking an animal on a sidewalk/leash, classify sub_type as 'dog' and mention the owner/leash in summary. "
+                        "If a small four-legged animal is alone on the driveway/pavement with NO person or leash visible, classify sub_type as 'cat'. "
+                        "If a vehicle is visible, inspect both the vehicle and bumper crop to read any legible license plate characters into 'plate' (or 'NONE'). "
                         f"If a delivery carrier or service crew (like LANDSCAPERS with mowers/blowers/vests/bandanas or AMAZON/UPS/FEDEX/USPS) is visible, set 'carrier' to one of {active_rule_names} (or 'NONE'). "
                         "Respond ONLY with valid JSON: "
                         '{"valid_target": true, "category": "person|delivery|vehicle|animal", '
-                        '"sub_type": "short label like dog, white suv, or person", '
+                        '"sub_type": "short label like cat, dog, white suv, or person", '
                         '"plate": "ABC1234 or NONE", '
                         f'"carrier": "{"|".join(active_rule_names)}|NONE", '
                         '"summary": "Concise 12-20 word tactical description of subject, clothing/gear, or vehicle"}'
@@ -389,7 +393,7 @@ async def deep_inspect_detection(event_id: int) -> dict:
                             json={
                                 "model": chosen_vlm,
                                 "prompt": prompt,
-                                "images": [b64_img],
+                                "images": images_b64,
                                 "format": "json",
                                 "stream": False,
                                 "options": {"temperature": 0.1},
@@ -420,29 +424,72 @@ async def deep_inspect_detection(event_id: int) -> dict:
                                     ev.sub_type = f"📦 DELIVERY: {carrier}{plate_str}"
                                     ev.full_label = f"{ev.motion_slot}_DELIVERY_{carrier}"
                             elif ev.category == "animal":
-                                if "dog" in vlm_sub or "dog" in summary.lower() or "leash" in summary.lower():
+                                if "cat" in vlm_sub or "cat" in summary.lower() or "feline" in summary.lower():
+                                    ev.sub_type = "cat"
+                                    ev.full_label = f"{ev.motion_slot}_cat"
+                                elif "dog" in vlm_sub or "dog" in summary.lower() or "leash" in summary.lower():
                                     ev.sub_type = "dog"
                                     ev.full_label = f"{ev.motion_slot}_dog"
                                 elif vlm_sub and vlm_sub not in ("none", "animal", "unknown"):
                                     ev.sub_type = vlm_sub[:32]
+                                    ev.full_label = f"{ev.motion_slot}_{vlm_sub.replace(' ', '_')[:24]}"
                             elif ev.category == "vehicle":
                                 plate_str = f" [PLATE: {plate}]" if plate else " [NO PLATE VIEW]"
-                                desc = vlm_sub.upper() if vlm_sub and vlm_sub != "none" else (ev.sub_type or "VEHICLE")
+                                desc = vlm_sub.upper() if vlm_sub and vlm_sub != "none" else (ev.sub_type or "VEHICLE").upper()
                                 ev.sub_type = f"🚗 {desc}{plate_str}"[:120]
                                 if plate:
                                     ev.full_label = f"{ev.motion_slot}_{plate.replace(' ', '')}"[:120]
 
                             face_prefix = f"🧬 [{recognized_face}] " if recognized_face else ""
+                            plate_prefix = f"[PLATE: {plate}] " if plate else ""
                             if summary:
-                                ai_notes_out = f"{face_prefix}[RTX 3060 Ti // {chosen_vlm}] {summary}"
+                                ai_notes_out = f"{face_prefix}{plate_prefix}[RTX 3060 Ti // {chosen_vlm}] {summary}"
                 except Exception as e:
                     print(f"[DEEP INSPECT VLM ERROR] {e}")
 
             if not ai_notes_out and recognized_face:
                 ai_notes_out = f"🧬 [BIOMETRIC MATCH: {recognized_face}]"
 
+            ev.ai_notes = ai_notes_out or ev.ai_notes
             ev.attributes = f"{snap_id}|{ai_notes_out}"[:250] if (snap_id and ai_notes_out) else (snap_id or ai_notes_out)[:250]
             await session.commit()
+
+            # Trigger Push Notification if enabled (never alert on whitelisted family or silent service rules)
+            is_silent_service = (ev.sub_type or "").startswith("🔇 SERVICE:")
+            if face_role != "whitelist" and not is_silent_service:
+                try:
+                    push_cfg = await get_push_config()
+                    cam_friendly = CAM_NAMES.get(ev.camera_id, ev.camera_id.upper())
+                    is_watchlist = face_role in ("watchlist", "watchlist_auto") or "WATCHLIST" in (ev.sub_type or "")
+                    is_breach = "BREACH" in (ev.full_label or "")
+                    is_delivery_alert = ev.category == "delivery" and (ev.sub_type or "").startswith("📦 DELIVERY:")
+
+                    if is_watchlist and push_cfg.notify_watchlist:
+                        await send_tactical_push(
+                            title=f"🚨 WATCHLIST MATCH // {cam_friendly}",
+                            message=ai_notes_out or ev.full_label,
+                            crop_path=crop_path,
+                            priority="urgent",
+                            tags="rotating_light,skull",
+                        )
+                    elif is_breach and push_cfg.notify_breach:
+                        await send_tactical_push(
+                            title=f"⚠️ TRIPWIRE BREACH // {cam_friendly}",
+                            message=ai_notes_out or ev.full_label,
+                            crop_path=crop_path,
+                            priority="high",
+                            tags="warning,shield",
+                        )
+                    elif is_delivery_alert and push_cfg.notify_delivery:
+                        await send_tactical_push(
+                            title=f"{ev.sub_type} // {cam_friendly}",
+                            message=ai_notes_out or ev.full_label,
+                            crop_path=crop_path,
+                            priority="default",
+                            tags="package,truck",
+                        )
+                except Exception as e:
+                    print(f"[PUSH DISPATCH ERROR] {e}")
 
             return {
                 "id": ev.id,
