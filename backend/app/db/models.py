@@ -45,6 +45,7 @@ class CameraSchedule(Base):
     mode: Mapped[str] = mapped_column(String(24), default="always_record")
     start_time: Mapped[str] = mapped_column(String(10), default="21:00")
     end_time: Mapped[str] = mapped_column(String(10), default="06:00")
+    alert_whitelist: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class KnownFace(Base):

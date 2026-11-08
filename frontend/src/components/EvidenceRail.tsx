@@ -47,6 +47,7 @@ const TEACH_PRESETS: Record<string, { label: string; value: string }[]> = {
     { label: '✅ ISAAC', value: 'ISAAC' },
     { label: '✅ JENNIFER', value: 'JENNIFER' },
     { label: '✅ BEAU', value: 'BEAU' },
+    { label: '✅ LYLA', value: 'LYLA' },
     { label: '👤 STRANGER', value: 'person' },
   ],
   delivery: [
@@ -533,7 +534,7 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                           type="text"
                           value={faceNameInput}
                           onChange={(e) => setFaceNameInput(e.target.value)}
-                          placeholder="ISAAC, JENNIFER, BEAU..."
+                          placeholder="ISAAC, JENNIFER, BEAU, LYLA..."
                           className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 uppercase"
                         />
                         <button
@@ -544,8 +545,8 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                           SAVE
                         </button>
                       </div>
-                      <div className="flex gap-1">
-                        {['ISAAC', 'JENNIFER', 'BEAU'].map((preset) => (
+                      <div className="flex flex-wrap gap-1">
+                        {['ISAAC', 'JENNIFER', 'BEAU', 'LYLA'].map((preset) => (
                           <button
                             key={preset}
                             type="button"

@@ -44,6 +44,7 @@ class ScheduleDTO(BaseModel):
     mode: str
     start_time: str
     end_time: str
+    alert_whitelist: bool = False
 
 
 class EnrollFaceDTO(BaseModel):
@@ -103,7 +104,13 @@ async def sync_schedules_to_engine(cv_engine: EdgeCVEngine):
         result = await session.execute(select(CameraSchedule))
         rows = result.scalars().all()
         sched_map = {
-            s: {"camera_id": s, "mode": "always_record", "start_time": "21:00", "end_time": "06:00"}
+            s: {
+                "camera_id": s,
+                "mode": "always_record",
+                "start_time": "21:00",
+                "end_time": "06:00",
+                "alert_whitelist": False,
+            }
             for s in STREAMS
         }
         for r in rows:
@@ -112,6 +119,7 @@ async def sync_schedules_to_engine(cv_engine: EdgeCVEngine):
                 "mode": r.mode,
                 "start_time": r.start_time,
                 "end_time": r.end_time,
+                "alert_whitelist": bool(getattr(r, "alert_whitelist", False)),
             }
         cv_engine.set_schedules(sched_map)
         return cv_engine.get_schedules_status()
@@ -423,6 +431,7 @@ async def update_camera_schedule(camera_id: str, payload: ScheduleDTO):
             existing.mode = payload.mode
             existing.start_time = payload.start_time
             existing.end_time = payload.end_time
+            existing.alert_whitelist = payload.alert_whitelist
         else:
             session.add(
                 CameraSchedule(
@@ -430,6 +439,7 @@ async def update_camera_schedule(camera_id: str, payload: ScheduleDTO):
                     mode=payload.mode,
                     start_time=payload.start_time,
                     end_time=payload.end_time,
+                    alert_whitelist=payload.alert_whitelist,
                 )
             )
         await session.commit()
@@ -567,6 +577,36 @@ async def purge_all_detections():
         await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
         await session.commit()
     return {"status": "PURGED"}
+
+
+@app.post("/api/system/reset")
+async def full_system_reset():
+    from app.services.ai_lessons import reset_ai_lessons
+    from app.services.delivery_rules import DEFAULT_RULES, save_delivery_rules
+
+    for ext in ("*.jpg", "*.mp4"):
+        for f in glob.glob(f"{SNAPSHOT_DIR}/{ext}"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    for f in glob.glob(f"{FACE_CROPS_DIR}/*.jpg"):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+    cv_engine = getattr(app.state, "cv_engine", None)
+    if cv_engine and hasattr(cv_engine, "heatmap_traces"):
+        for k in cv_engine.heatmap_traces:
+            cv_engine.clear_camera_heatmap(k)
+    async with AsyncSessionLocal() as session:
+        await session.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY;"))
+        await session.execute(delete(KnownFace).where(KnownFace.role != "watchlist_auto"))
+        await session.commit()
+    reset_ai_lessons()
+    save_delivery_rules([dict(r) for r in DEFAULT_RULES])
+    await face_engine.sync_gallery_from_db_and_disk()
+    return {"status": "FRESH_START_COMPLETE", "remaining_watchlist_vectors": len(face_engine.gallery)}
 
 
 @app.post("/api/detections/{event_id}/inspect")

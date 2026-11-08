@@ -35,12 +35,25 @@ def _sanitize_lessons(raw_list: list[dict]) -> list[dict]:
     for item in raw_list:
         c_cat = str(item.get("correct_category") or "").lower()
         c_sub = str(item.get("correct_sub_type") or "").lower()
-        if c_cat == "person" and any(n in c_sub for n in ("isaac", "jennifer", "beau")):
+        if c_cat == "person" and any(n in c_sub for n in ("isaac", "jennifer", "beau", "lyla")):
             continue
         cleaned.append(item)
     if not any(x.get("wrong_sub_type") == "bird" and x.get("correct_sub_type") == "cat" for x in cleaned):
         cleaned.append(dict(DEFAULT_LESSONS[1], id=max([int(x.get("id", 0)) for x in cleaned] + [1]) + 1))
     return cleaned
+
+
+def reset_ai_lessons() -> list[dict]:
+    global _MEM_LESSONS
+    with _lock:
+        _MEM_LESSONS = [dict(x) for x in DEFAULT_LESSONS]
+        try:
+            os.makedirs(os.path.dirname(LESSONS_FILE), exist_ok=True)
+            with open(LESSONS_FILE, "w") as f:
+                json.dump(_MEM_LESSONS, f, indent=2)
+        except Exception:
+            pass
+        return list(_MEM_LESSONS)
 
 
 def get_ai_lessons(camera_id: str | None = None) -> list[dict]:

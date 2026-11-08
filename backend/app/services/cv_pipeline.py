@@ -400,7 +400,7 @@ class EdgeCVEngine:
         self.last_heat_sample: dict[str, float] = {s: 0.0 for s in streams}
         self.zones: dict[str, list[dict]] = {s: [] for s in streams}
         self.schedules: dict[str, dict] = {
-            s: {"camera_id": s, "mode": "always_record", "start_time": "21:00", "end_time": "06:00"} for s in streams
+            s: {"camera_id": s, "mode": "always_record", "start_time": "21:00", "end_time": "06:00", "alert_whitelist": False} for s in streams
         }
         self.zones_lock = threading.Lock()
         self.grabbers: list[LatestFrameGrabber] = []

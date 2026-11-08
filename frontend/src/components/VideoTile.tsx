@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useWhepClient } from '../hooks/useWhepClient';
 import type { BoundingBoxDetection, CameraScheduleConfig, CameraZone, HeatmapPoint, ZonePoint } from '../types/telemetry';
-import { Check, Clock, Crosshair, Database, Eye, EyeOff, Flame, Maximize2, Minimize2, PauseCircle, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
+import { Bell, BellOff, Check, Clock, Crosshair, Database, Eye, EyeOff, Flame, Maximize2, Minimize2, PauseCircle, RotateCcw, ShieldAlert, ShieldOff, Trash2, X } from 'lucide-react';
 
 interface VideoTileProps {
   title: string;
@@ -91,12 +91,14 @@ export function VideoTile({
   const [schedMode, setSchedMode] = useState<'always_record' | 'paused' | 'schedule'>('always_record');
   const [schedStart, setSchedStart] = useState<string>('21:00');
   const [schedEnd, setSchedEnd] = useState<string>('06:00');
+  const [alertWhitelist, setAlertWhitelist] = useState<boolean>(false);
 
   useEffect(() => {
     if (schedule) {
       setSchedMode(schedule.mode);
       setSchedStart(schedule.start_time || '21:00');
       setSchedEnd(schedule.end_time || '06:00');
+      setAlertWhitelist(Boolean(schedule.alert_whitelist));
     }
   }, [schedule]);
 
@@ -168,8 +170,13 @@ export function VideoTile({
     }
   }, [detections, autoLock, drawMode]);
 
-  const saveSchedule = async (modeOverride?: 'always_record' | 'paused' | 'schedule') => {
+  const saveSchedule = async (
+    modeOverride?: 'always_record' | 'paused' | 'schedule',
+    alertWhitelistOverride?: boolean
+  ) => {
     const targetMode = modeOverride || schedMode;
+    const targetAlertWhitelist =
+      alertWhitelistOverride !== undefined ? alertWhitelistOverride : alertWhitelist;
     try {
       const res = await fetch(`${apiBase}/api/cameras/${streamName}/schedule`, {
         method: 'POST',
@@ -178,6 +185,7 @@ export function VideoTile({
           mode: targetMode,
           start_time: schedStart,
           end_time: schedEnd,
+          alert_whitelist: targetAlertWhitelist,
         }),
       });
       if (res.ok && onScheduleUpdated) {
@@ -188,6 +196,12 @@ export function VideoTile({
     } catch (err) {
       console.error('Failed to save camera schedule:', err);
     }
+  };
+
+  const toggleFamilyAlert = async () => {
+    const nextVal = !alertWhitelist;
+    setAlertWhitelist(nextVal);
+    await saveSchedule(schedMode, nextVal);
   };
 
   const startDrawing = (type: 'exclusion' | 'tripwire') => {
@@ -569,6 +583,23 @@ export function VideoTile({
               </button>
 
               <button
+                onClick={toggleFamilyAlert}
+                title={
+                  alertWhitelist
+                    ? 'Family / All Alerts ON for this camera (ISAAC exempt) — Click to silence family'
+                    : 'Family Whitelist Silent — Click to alert on Family & All detections on this camera (ISAAC exempt)'
+                }
+                className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer transition-colors ${
+                  alertWhitelist
+                    ? 'bg-sky-600 text-white border-sky-400 shadow-[0_0_10px_rgba(14,165,233,0.45)]'
+                    : 'bg-zinc-950/85 hover:bg-zinc-800 text-zinc-400 border-zinc-800'
+                }`}
+              >
+                {alertWhitelist ? <Bell className="w-3 h-3" /> : <BellOff className="w-3 h-3" />}
+                <span>{alertWhitelist ? 'FAM·ALERT' : 'FAM·SILENT'}</span>
+              </button>
+
+              <button
                 onClick={() => setShowHeatmap((prev) => !prev)}
                 title="Toggle 24-Hour Tactical Thermal Heatmap Overlay"
                 className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer ${
@@ -753,6 +784,23 @@ export function VideoTile({
               </button>
             </div>
           )}
+
+          <div className="pt-2 border-t border-zinc-800 flex items-center justify-between gap-2">
+            <div className="text-[10px] text-zinc-300 leading-tight">
+              <div className="font-bold text-sky-300">FAMILY / ALL ALERTS</div>
+              <div className="text-[9px] text-zinc-400">Alert on Whitelist (ISAAC exempt)</div>
+            </div>
+            <button
+              onClick={toggleFamilyAlert}
+              className={`px-2 py-1 rounded text-[10px] font-bold border cursor-pointer ${
+                alertWhitelist
+                  ? 'bg-sky-600 text-white border-sky-400'
+                  : 'bg-zinc-900 text-zinc-400 border-zinc-700'
+              }`}
+            >
+              {alertWhitelist ? 'ON' : 'OFF'}
+            </button>
+          </div>
         </div>
       )}
     </div>

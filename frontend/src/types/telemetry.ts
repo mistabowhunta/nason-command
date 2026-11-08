@@ -30,6 +30,7 @@ export interface CameraScheduleConfig {
   mode: 'always_record' | 'paused' | 'schedule';
   start_time: string;
   end_time: string;
+  alert_whitelist?: boolean;
   currently_recording: boolean;
   server_time?: string;
 }

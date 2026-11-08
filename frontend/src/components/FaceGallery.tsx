@@ -282,7 +282,7 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
                 type="text"
                 value={importName}
                 onChange={(e) => setImportName(e.target.value)}
-                placeholder="e.g. ISAAC, JENNIFER, PROWLER_01..."
+                placeholder="e.g. ISAAC, JENNIFER, BEAU, LYLA..."
                 className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-zinc-100 uppercase"
               />
             </div>
@@ -409,8 +409,11 @@ export function FaceGallery({ hostIp }: FaceGalleryProps) {
       </div>
 
       {pagedFaces.length === 0 ? (
-        <div className="bg-zinc-900/40 border border-zinc-800 rounded-lg py-16 text-center text-xs text-zinc-500">
-          No active face vectors in this view. ({autoWatchlistCount} background FBI/DOC vectors are armed in RAM with 0 sightings).
+        <div className="grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          <DeliveryRulesPanel />
+          <div className="sm:col-span-1 lg:col-span-2 xl:col-span-3 bg-zinc-900/40 border border-zinc-800 rounded-lg py-16 px-4 text-center text-xs text-zinc-500">
+            No enrolled family or visitor face vectors yet. Use 👤 ID FACE or 🎓 TEACH in the Kill-Feed (or + ENROLL PHOTO above) to enroll ISAAC, JENNIFER, BEAU, or LYLA. ({autoWatchlistCount} background FBI/DOC vectors are armed in RAM).
+          </div>
         </div>
       ) : (
         <div className="grid items-start grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
