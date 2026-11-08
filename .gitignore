@@ -33,3 +33,4 @@ backend/app/known_faces/*
 backend/models/*.json
 backend/models/*.pt
 backend/models/*.onnx
+runtime_data/

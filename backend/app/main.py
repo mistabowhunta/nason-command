@@ -17,7 +17,7 @@ from sqlalchemy import select, delete, text
 from app.api.ws import router as ws_router, telemetry_and_cv_broadcaster
 from app.db.session import init_db, AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone, CameraSchedule, KnownFace, PushSettings
-from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, SNAPSHOT_DIR, get_snapshots_storage_mb
+from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, periodic_maintenance_worker, SNAPSHOT_DIR, get_snapshots_storage_mb
 from app.services.face_engine import face_engine, FACE_CROPS_DIR
 from app.services.watchlist_scraper import periodic_watchlist_worker, sync_public_mugshot_feeds
 from app.services.push_notifier import get_push_config, send_tactical_push
@@ -106,9 +106,9 @@ async def sync_schedules_to_engine(cv_engine: EdgeCVEngine):
         sched_map = {
             s: {
                 "camera_id": s,
-                "mode": "always_record",
-                "start_time": "21:00",
-                "end_time": "06:00",
+                "mode": "schedule" if s in ("tapo_1", "tapo_2") else "always_record",
+                "start_time": "23:30" if s in ("tapo_1", "tapo_2") else "21:00",
+                "end_time": "05:00" if s in ("tapo_1", "tapo_2") else "06:00",
                 "alert_whitelist": False,
             }
             for s in STREAMS
@@ -141,11 +141,13 @@ async def lifespan(app: FastAPI):
     ws_task = asyncio.create_task(telemetry_and_cv_broadcaster(cv_engine))
     db_task = asyncio.create_task(db_persistence_worker(event_queue))
     scraper_task = asyncio.create_task(periodic_watchlist_worker())
+    maint_task = asyncio.create_task(periodic_maintenance_worker())
     yield
     cv_engine.stop()
     ws_task.cancel()
     db_task.cancel()
     scraper_task.cancel()
+    maint_task.cancel()
 
 
 app = FastAPI(title="NasonNation | Command API", lifespan=lifespan)

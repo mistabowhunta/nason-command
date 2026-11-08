@@ -3,7 +3,7 @@ import os
 import threading
 from datetime import datetime, timezone
 
-LESSONS_FILE = "/app/models/ai_lessons.json"
+LESSONS_FILE = "/tmp/command_faces/ai_lessons.json"
 _lock = threading.Lock()
 
 DEFAULT_LESSONS = [

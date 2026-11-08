@@ -3,6 +3,11 @@ services:
     image: bluenviron/mediamtx:latest
     container_name: command-mediamtx
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       - TZ=America/Los_Angeles
       - MTX_WEBRTCADDITIONALHOSTS=${HOST_LAN_IP:-192.168.1.27}
@@ -23,6 +28,11 @@ services:
     image: postgres:16-alpine
     container_name: command-postgres
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -45,6 +55,11 @@ services:
       dockerfile: Dockerfile
     container_name: command-backend
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - MEDIAMTX_RTSP_BASE=rtsp://mediamtx:8554
@@ -52,6 +67,9 @@ services:
       - "8080:8080"
     volumes:
       - ./backend/app:/app/app:ro
+      - ./runtime_data/snapshots:/tmp/command_snapshots
+      - ./runtime_data/faces:/tmp/command_faces
+      - ./runtime_data/backups:/tmp/command_backups
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,6 +84,11 @@ services:
       dockerfile: Dockerfile
     container_name: command-frontend
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "3000:80"
     depends_on:

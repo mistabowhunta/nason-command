@@ -613,3 +613,134 @@ async def db_persistence_worker(event_queue: asyncio.Queue):
                 asyncio.create_task(deep_inspect_detection(ev_id))
         except Exception as e:
             print(f"[DB ERROR] {e}")
+
+
+BACKUP_DIR = "/tmp/command_backups"
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+async def periodic_maintenance_worker():
+    """
+    Long-running server & database maintenance worker (runs every 6 hours):
+    1. Enforces snapshot/clip disk quota on the 1TB HDD (/tmp/command_snapshots).
+    2. Prunes detection_events rows older than 14 days so Postgres stays lean.
+    3. Prunes 1-time VISITOR_XX face vectors unseen for >14 days (never touches whitelist or watchlist).
+    4. Runs Postgres VACUUM ANALYZE on detection_events & known_faces.
+    5. Writes a rolling 7-day compressed backup (.json.gz) of faces, zones, schedules, rules, and lessons to /tmp/command_backups on the 1TB HDD.
+    """
+    import gzip
+    import json as _json
+    from sqlalchemy import select as _sel, delete as _del, text as _text
+    from app.db.session import engine as _engine
+    from app.db.models import KnownFace as _KF, CameraZone as _CZ, CameraSchedule as _CS, PushSettings as _PS
+    from app.services.face_engine import FACE_CROPS_DIR as _FC_DIR
+    from app.services.delivery_rules import get_delivery_rules as _get_dr
+    from app.services.ai_lessons import get_ai_lessons as _get_al
+
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await asyncio.to_thread(enforce_storage_limits)
+            cutoff_14d = datetime.now(timezone.utc) - timedelta(days=14)
+            removed_visitors = 0
+
+            async with AsyncSessionLocal() as session:
+                await session.execute(_del(DetectionEvent).where(DetectionEvent.timestamp < cutoff_14d))
+
+                stale_res = await session.execute(
+                    _sel(_KF).where(_KF.role == "visitor", _KF.sightings <= 1, _KF.last_seen < cutoff_14d)
+                )
+                for vf in stale_res.scalars().all():
+                    if vf.sample_crop and vf.sample_crop.startswith("/face_crops/"):
+                        cf = os.path.join(_FC_DIR, os.path.basename(vf.sample_crop))
+                        if os.path.exists(cf):
+                            try:
+                                os.remove(cf)
+                            except OSError:
+                                pass
+                    await session.delete(vf)
+                    removed_visitors += 1
+
+                await session.commit()
+
+                # Build rolling daily backup payload
+                faces_res = await session.execute(_sel(_KF).where(_KF.role != "watchlist_auto"))
+                zones_res = await session.execute(_sel(_CZ))
+                sched_res = await session.execute(_sel(_CS))
+                push_res = await session.execute(_sel(_PS))
+
+                backup_payload = {
+                    "backed_up_at": datetime.now(timezone.utc).isoformat(),
+                    "known_faces": [
+                        {
+                            "name": f.name,
+                            "role": f.role,
+                            "embedding_json": f.embedding_json,
+                            "sample_crop": f.sample_crop,
+                            "sightings": f.sightings,
+                            "last_seen": f.last_seen.isoformat() if f.last_seen else None,
+                        }
+                        for f in faces_res.scalars().all()
+                    ],
+                    "camera_zones": [
+                        {
+                            "camera_id": z.camera_id,
+                            "name": z.name,
+                            "zone_type": z.zone_type,
+                            "points_json": z.points_json,
+                        }
+                        for z in zones_res.scalars().all()
+                    ],
+                    "camera_schedules": [
+                        {
+                            "camera_id": s.camera_id,
+                            "mode": s.mode,
+                            "start_time": s.start_time,
+                            "end_time": s.end_time,
+                            "alert_whitelist": bool(getattr(s, "alert_whitelist", False)),
+                        }
+                        for s in sched_res.scalars().all()
+                    ],
+                    "push_settings": [
+                        {
+                            "enabled": p.enabled,
+                            "ntfy_topic": p.ntfy_topic,
+                            "discord_webhook": p.discord_webhook,
+                            "notify_breach": p.notify_breach,
+                            "notify_watchlist": p.notify_watchlist,
+                            "notify_delivery": p.notify_delivery,
+                        }
+                        for p in push_res.scalars().all()
+                    ],
+                    "delivery_rules": _get_dr(),
+                    "ai_lessons": _get_al(),
+                }
+
+            if removed_visitors > 0:
+                await face_engine.sync_gallery_from_db_and_disk()
+
+            # Write rolling daily backup to /tmp/command_backups (mounted on 1TB HDD)
+            day_stamp = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d")
+            backup_path = os.path.join(BACKUP_DIR, f"command_backup_{day_stamp}.json.gz")
+            with gzip.open(backup_path, "wt", encoding="utf-8") as gz:
+                _json.dump(backup_payload, gz)
+
+            # Prune backups older than 7 days
+            now_s = time.time()
+            for old_b in glob.glob(f"{BACKUP_DIR}/command_backup_*.json.gz"):
+                try:
+                    if now_s - os.path.getmtime(old_b) > 7 * 86400:
+                        os.remove(old_b)
+                except OSError:
+                    pass
+
+            # Run Postgres VACUUM ANALYZE outside a transaction block
+            async with _engine.connect() as conn:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                await conn.execute(_text("VACUUM ANALYZE detection_events, known_faces;"))
+
+            print(f"[MAINTENANCE] Completed DB vacuum, retention check, and HDD backup ({backup_path})")
+        except Exception as e:
+            print(f"[MAINTENANCE WARNING] {e}")
+
+        await asyncio.sleep(21600)

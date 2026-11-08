@@ -31,25 +31,13 @@ async def init_db():
             text("ALTER TABLE camera_schedules ADD COLUMN IF NOT EXISTS alert_whitelist BOOLEAN DEFAULT FALSE")
         )
         await conn.execute(
-            text("CREATE TABLE IF NOT EXISTS system_migrations (key VARCHAR(64) PRIMARY KEY)")
-        )
-        mig_res = await conn.execute(
-            text("SELECT key FROM system_migrations WHERE key = 'fresh_start_v72_lyla'")
-        )
-        if mig_res.scalar_one_or_none() is None:
-            await conn.execute(text("TRUNCATE TABLE detection_events RESTART IDENTITY"))
-            await conn.execute(text("DELETE FROM known_faces WHERE role != 'watchlist_auto'"))
-            await conn.execute(text("UPDATE camera_schedules SET alert_whitelist = FALSE"))
-            await conn.execute(
-                text("INSERT INTO system_migrations (key) VALUES ('fresh_start_v72_lyla')")
+            text(
+                "INSERT INTO camera_schedules (camera_id, mode, start_time, end_time, alert_whitelist) "
+                "VALUES ('tapo_1', 'schedule', '23:30', '05:00', FALSE), "
+                "       ('tapo_2', 'schedule', '23:30', '05:00', FALSE) "
+                "ON CONFLICT (camera_id) DO NOTHING"
             )
-            try:
-                from app.services.ai_lessons import reset_ai_lessons
-                from app.services.delivery_rules import DEFAULT_RULES, save_delivery_rules
-                reset_ai_lessons()
-                save_delivery_rules([dict(r) for r in DEFAULT_RULES])
-            except Exception as e:
-                print(f"[FRESH START RESET WARNING] {e}")
+        )
         await conn.execute(
             text(
                 "UPDATE detection_events "
