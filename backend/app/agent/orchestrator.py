@@ -305,11 +305,239 @@ async def process_command_prompt(prompt: str) -> dict:
     }
 
 # --- v7.2 Final: Deep Inspect with Taught AI Lessons, Delivery Rules, Driveway LPR & Camera Family Alert Toggle ---
-from datetime import datetime as _dt, timezone as _tz
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
 from sqlalchemy import update as _update
 from app.db.models import KnownFace as _KnownFace, CameraSchedule as _CameraSchedule
 from app.services.delivery_rules import get_delivery_rules as _get_delivery_rules, record_delivery_sighting as _record_delivery_sighting
 from app.services.ai_lessons import get_ai_lessons as _get_ai_lessons
+
+
+def _is_isaac_event(sub_type: str | None, full_label: str | None, ai_notes: str | None = None) -> bool:
+    u_sub = (sub_type or "").upper()
+    u_lbl = (full_label or "").upper()
+    u_not = (ai_notes or "").upper()
+    return (
+        "ID: ISAAC" in u_sub
+        or u_lbl.endswith("_ISAAC")
+        or "_ISAAC_" in u_lbl
+        or "[ISAAC (" in u_not
+        or "MATCH: ISAAC" in u_not
+    )
+
+
+def _is_whitelist_family_event(sub_type: str | None, full_label: str | None, face_role: str | None = None) -> bool:
+    u_sub = (sub_type or "").upper()
+    if "WATCHLIST" in u_sub or "VISITOR_" in u_sub:
+        return False
+    if face_role == "whitelist" or u_sub.startswith("ID: "):
+        return True
+    return False
+
+
+async def _evaluate_best_confidence_push(
+    event_id: int,
+    face_role: str | None = None,
+    recognized_face: str | None = None,
+):
+    """
+    Waits briefly (4.5s) so the 5-second MP4 replay clip finishes encoding and any sibling
+    detections from the same person/vehicle walking closer are committed. Then selects ONLY
+    the single highest-confidence detection in the encounter window (±30s) and enforces a 90s
+    per-camera/category cooldown so the user only receives 1 alert with the best confidence.
+    """
+    try:
+        await asyncio.sleep(4.5)
+        # Wait if a sibling detection from the same burst is still inside GPU_SEMAPHORE
+        wait_ticks = 0
+        while GPU_SEMAPHORE.locked() and wait_ticks < 24:
+            await asyncio.sleep(0.5)
+            wait_ticks += 1
+
+        async with AsyncSessionLocal() as session:
+            ev = await session.get(DetectionEvent, event_id)
+            if not ev:
+                return
+
+            cam_sched = await session.get(_CameraSchedule, ev.camera_id)
+            cam_alert_all = bool(cam_sched and getattr(cam_sched, "alert_whitelist", False))
+            push_cfg = await get_push_config()
+
+            win_start = ev.timestamp - _td(seconds=30)
+            win_end = ev.timestamp + _td(seconds=30)
+            burst_res = await session.execute(
+                select(DetectionEvent).where(
+                    DetectionEvent.camera_id == ev.camera_id,
+                    DetectionEvent.timestamp >= win_start,
+                    DetectionEvent.timestamp <= win_end,
+                )
+            )
+            burst_events = burst_res.scalars().all()
+
+        # 1. If ANY event in this camera's ±30s encounter window was identified as ISAAC or a Silent Service,
+        #    suppress the entire encounter (prevents an angled back-turned frame of ISAAC from alerting).
+        for b in burst_events:
+            if _is_isaac_event(b.sub_type, b.full_label, b.ai_notes) or (b.sub_type or "").startswith("🔇 SERVICE:"):
+                return
+
+        if _is_isaac_event(ev.sub_type, ev.full_label, ev.ai_notes) or (ev.sub_type or "").startswith("🔇 SERVICE:"):
+            return
+
+        # 2. If cam_alert_all is OFF and ANY person event in this ±30s burst was recognized as whitelisted family
+        #    (JENNIFER, BEAU, LYLA), suppress person alerts for this burst so angled frames don't false-alert.
+        if not cam_alert_all and ev.category == "person":
+            if any(_is_whitelist_family_event(b.sub_type, b.full_label) for b in burst_events):
+                return
+
+        def _cat_group(c: str | None) -> str:
+            return "person_or_delivery" if c in ("person", "delivery") else (c or "other")
+
+        my_group = _cat_group(ev.category)
+
+        def _qualifies_and_score(cand: DetectionEvent) -> tuple[bool, tuple]:
+            c_sub = cand.sub_type or ""
+            c_lbl = cand.full_label or ""
+            if _is_isaac_event(c_sub, c_lbl, cand.ai_notes) or c_sub.startswith("🔇 SERVICE:"):
+                return (False, (0, 0, 0, 0.0, 0))
+            c_watch = "WATCHLIST" in c_sub or ("watchlist" if cand.id == ev.id and face_role in ("watchlist", "watchlist_auto") else "") != ""
+            c_breach = "BREACH" in c_lbl
+            c_deliv = cand.category == "delivery" and c_sub.startswith("📦 DELIVERY:")
+            c_fam = _is_whitelist_family_event(c_sub, c_lbl, face_role if cand.id == ev.id else None)
+
+            qualifies = False
+            if c_watch and (push_cfg.notify_watchlist or cam_alert_all):
+                qualifies = True
+            elif cam_alert_all:
+                qualifies = True
+            elif not c_fam:
+                if (c_breach and push_cfg.notify_breach) or (c_deliv and push_cfg.notify_delivery):
+                    qualifies = True
+
+            # Rank by: Watchlist > Breach/Delivery > Recognized Face/Plate > Confidence % > ID
+            has_id_or_plate = 1 if (c_sub.startswith("ID: ") or "[PLATE:" in c_sub or c_deliv) else 0
+            score = (
+                1 if c_watch else 0,
+                1 if (c_breach or c_deliv) else 0,
+                has_id_or_plate,
+                round(float(cand.confidence or 0.0), 4),
+                cand.id,
+            )
+            return (qualifies, score)
+
+        my_qualifies, my_score = _qualifies_and_score(ev)
+        if not my_qualifies:
+            return
+
+        # 3. Compare against all alert-qualifying sibling events in the ±30s encounter window:
+        #    Only the single event with the highest confidence/score sends the alert!
+        for sibling in burst_events:
+            if sibling.id == ev.id or _cat_group(sibling.category) != my_group:
+                continue
+            sib_qualifies, sib_score = _qualifies_and_score(sibling)
+            if sib_qualifies and sib_score > my_score:
+                return
+
+        snap_id = (ev.attributes or "").split("|")[0].strip()
+        crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}" if snap_id else None
+        plate_path = f"{SNAPSHOT_DIR}/plate_{snap_id}" if snap_id else None
+        clip_path = f"{SNAPSHOT_DIR}/clip_{snap_id}.mp4" if snap_id else None
+        ai_notes_out = ev.ai_notes or (ev.attributes.split("|", 1)[1].strip() if "|" in (ev.attributes or "") else "")
+
+        cam_friendly = CAM_NAMES.get(ev.camera_id, ev.camera_id.upper())
+        is_watchlist = face_role in ("watchlist", "watchlist_auto") or "WATCHLIST" in (ev.sub_type or "")
+        is_breach = "BREACH" in (ev.full_label or "")
+        is_delivery_alert = ev.category == "delivery" and (ev.sub_type or "").startswith("📦 DELIVERY:")
+        is_family_whitelist = _is_whitelist_family_event(ev.sub_type, ev.full_label, face_role)
+        dedup_key = f"{ev.camera_id}:{my_group}"
+
+        if is_watchlist and (push_cfg.notify_watchlist or cam_alert_all):
+            await send_tactical_push(
+                title=f"🚨 WATCHLIST MATCH // {cam_friendly}",
+                message=ai_notes_out or ev.full_label,
+                crop_path=crop_path,
+                plate_path=plate_path,
+                clip_path=clip_path,
+                confidence=ev.confidence,
+                priority="urgent",
+                tags="rotating_light,skull",
+                dedup_key=dedup_key,
+            )
+        elif cam_alert_all:
+            if is_family_whitelist:
+                fam_name = (ev.sub_type or "").replace("ID:", "").strip() or (recognized_face or "FAMILY")
+                await send_tactical_push(
+                    title=f"🏠 FAMILY DETECTED: {fam_name} // {cam_friendly}",
+                    message=ai_notes_out or ev.full_label,
+                    crop_path=crop_path,
+                    plate_path=plate_path,
+                    clip_path=clip_path,
+                    confidence=ev.confidence,
+                    priority="high",
+                    tags="house,bell",
+                    dedup_key=f"{ev.camera_id}:family:{fam_name}",
+                )
+            elif is_breach:
+                await send_tactical_push(
+                    title=f"⚠️ TRIPWIRE BREACH // {cam_friendly}",
+                    message=ai_notes_out or ev.full_label,
+                    crop_path=crop_path,
+                    plate_path=plate_path,
+                    clip_path=clip_path,
+                    confidence=ev.confidence,
+                    priority="high",
+                    tags="warning,shield",
+                    dedup_key=dedup_key,
+                )
+            elif is_delivery_alert:
+                await send_tactical_push(
+                    title=f"{ev.sub_type} // {cam_friendly}",
+                    message=ai_notes_out or ev.full_label,
+                    crop_path=crop_path,
+                    plate_path=plate_path,
+                    clip_path=clip_path,
+                    confidence=ev.confidence,
+                    priority="default",
+                    tags="package,truck",
+                    dedup_key=dedup_key,
+                )
+            else:
+                await send_tactical_push(
+                    title=f"🔔 {(ev.sub_type or ev.category).upper()} // {cam_friendly}",
+                    message=ai_notes_out or ev.full_label,
+                    crop_path=crop_path,
+                    plate_path=plate_path,
+                    clip_path=clip_path,
+                    confidence=ev.confidence,
+                    priority="default",
+                    tags="bell,eye",
+                    dedup_key=dedup_key,
+                )
+        elif not is_family_whitelist:
+            if is_breach and push_cfg.notify_breach:
+                await send_tactical_push(
+                    title=f"⚠️ TRIPWIRE BREACH // {cam_friendly}",
+                    message=ai_notes_out or ev.full_label,
+                    crop_path=crop_path,
+                    plate_path=plate_path,
+                    clip_path=clip_path,
+                    confidence=ev.confidence,
+                    priority="high",
+                    tags="warning,shield",
+                    dedup_key=dedup_key,
+                )
+            elif is_delivery_alert and push_cfg.notify_delivery:
+                await send_tactical_push(
+                    title=f"{ev.sub_type} // {cam_friendly}",
+                    message=ai_notes_out or ev.full_label,
+                    crop_path=crop_path,
+                    plate_path=plate_path,
+                    clip_path=clip_path,
+                    confidence=ev.confidence,
+                    priority="default",
+                    tags="package,truck",
+                    dedup_key=dedup_key,
+                )
+    except Exception as e:
+        print(f"[PUSH DISPATCH ERROR] {e}")
 
 
 async def deep_inspect_detection(event_id: int) -> dict:
@@ -458,9 +686,6 @@ async def deep_inspect_detection(event_id: int) -> dict:
             if not ai_notes_out and recognized_face:
                 ai_notes_out = f"🧬 [BIOMETRIC MATCH: {recognized_face}]"
 
-            cam_sched = await session.get(_CameraSchedule, ev.camera_id)
-            cam_alert_all = bool(cam_sched and getattr(cam_sched, "alert_whitelist", False))
-
             upper_sub = (ev.sub_type or "").upper()
             upper_lbl = (ev.full_label or "").upper()
             upper_face = (recognized_face or "").upper()
@@ -477,86 +702,7 @@ async def deep_inspect_detection(event_id: int) -> dict:
             ev.attributes = f"{snap_id}|{ai_notes_out}"[:250] if (snap_id and ai_notes_out) else (snap_id or ai_notes_out)[:250]
             await session.commit()
 
-            # Trigger Push Notification if enabled:
-            # - ISAAC and silent service rules NEVER trigger alerts.
-            # - If camera-specific Family/All-Alerts toggle (cam_alert_all) is ON, all detections on this camera
-            #   (including whitelisted family members like JENNIFER, BEAU, LYLA) trigger alerts (except ISAAC).
-            # - If cam_alert_all is OFF (default), whitelisted family never trigger alerts; only Watchlist,
-            #   Tripwire breaches, and Alert-mode Deliveries trigger alerts.
-            is_silent_service = (ev.sub_type or "").startswith("🔇 SERVICE:")
-            if not is_isaac and not is_silent_service:
-                try:
-                    push_cfg = await get_push_config()
-                    cam_friendly = CAM_NAMES.get(ev.camera_id, ev.camera_id.upper())
-                    is_watchlist = face_role in ("watchlist", "watchlist_auto") or "WATCHLIST" in (ev.sub_type or "")
-                    is_breach = "BREACH" in (ev.full_label or "")
-                    is_delivery_alert = ev.category == "delivery" and (ev.sub_type or "").startswith("📦 DELIVERY:")
-                    is_family_whitelist = (
-                        face_role == "whitelist"
-                        or ((ev.sub_type or "").startswith("ID: ") and "VISITOR_" not in (ev.sub_type or "") and not is_watchlist)
-                    )
-
-                    if is_watchlist and (push_cfg.notify_watchlist or cam_alert_all):
-                        await send_tactical_push(
-                            title=f"🚨 WATCHLIST MATCH // {cam_friendly}",
-                            message=ai_notes_out or ev.full_label,
-                            crop_path=crop_path,
-                            priority="urgent",
-                            tags="rotating_light,skull",
-                        )
-                    elif cam_alert_all:
-                        if is_family_whitelist:
-                            fam_name = (ev.sub_type or "").replace("ID:", "").strip() or (recognized_face or "FAMILY")
-                            await send_tactical_push(
-                                title=f"🏠 FAMILY DETECTED: {fam_name} // {cam_friendly}",
-                                message=ai_notes_out or ev.full_label,
-                                crop_path=crop_path,
-                                priority="high",
-                                tags="house,bell",
-                            )
-                        elif is_breach:
-                            await send_tactical_push(
-                                title=f"⚠️ TRIPWIRE BREACH // {cam_friendly}",
-                                message=ai_notes_out or ev.full_label,
-                                crop_path=crop_path,
-                                priority="high",
-                                tags="warning,shield",
-                            )
-                        elif is_delivery_alert:
-                            await send_tactical_push(
-                                title=f"{ev.sub_type} // {cam_friendly}",
-                                message=ai_notes_out or ev.full_label,
-                                crop_path=crop_path,
-                                priority="default",
-                                tags="package,truck",
-                            )
-                        else:
-                            await send_tactical_push(
-                                title=f"🔔 {(ev.sub_type or ev.category).upper()} // {cam_friendly}",
-                                message=ai_notes_out or ev.full_label,
-                                crop_path=crop_path,
-                                priority="default",
-                                tags="bell,eye",
-                            )
-                    elif not is_family_whitelist:
-                        if is_breach and push_cfg.notify_breach:
-                            await send_tactical_push(
-                                title=f"⚠️ TRIPWIRE BREACH // {cam_friendly}",
-                                message=ai_notes_out or ev.full_label,
-                                crop_path=crop_path,
-                                priority="high",
-                                tags="warning,shield",
-                            )
-                        elif is_delivery_alert and push_cfg.notify_delivery:
-                            await send_tactical_push(
-                                title=f"{ev.sub_type} // {cam_friendly}",
-                                message=ai_notes_out or ev.full_label,
-                                crop_path=crop_path,
-                                priority="default",
-                                tags="package,truck",
-                            )
-                except Exception as e:
-                    print(f"[PUSH DISPATCH ERROR] {e}")
+            asyncio.create_task(_evaluate_best_confidence_push(ev.id, face_role, recognized_face))
 
             return {
                 "id": ev.id,

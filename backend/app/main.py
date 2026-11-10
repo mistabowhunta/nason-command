@@ -207,9 +207,24 @@ async def save_push_settings(payload: PushConfigDTO):
 
 @app.post("/api/push/test")
 async def trigger_test_push():
+    crop_path, plate_path, clip_path, conf = None, None, None, 0.96
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(DetectionEvent).order_by(DetectionEvent.timestamp.desc()).limit(1))
+        latest = res.scalar_one_or_none()
+        if latest and latest.attributes:
+            snap_id = latest.attributes.split("|")[0].strip()
+            if snap_id:
+                crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}"
+                plate_path = f"{SNAPSHOT_DIR}/plate_{snap_id}"
+                clip_path = f"{SNAPSHOT_DIR}/clip_{snap_id}.mp4"
+                conf = latest.confidence
     return await send_tactical_push(
         title="🛡️ NASONNATION // COMMAND TEST",
-        message="Tactical Push Alert link verified from node BOSSMAN (192.168.1.27).",
+        message="Tactical Push Alert link verified from node BOSSMAN (192.168.1.27) — Rich Image + 5s MP4 Clip enabled.",
+        crop_path=crop_path,
+        plate_path=plate_path,
+        clip_path=clip_path,
+        confidence=conf,
         priority="high",
         tags="white_check_mark,shield",
     )
