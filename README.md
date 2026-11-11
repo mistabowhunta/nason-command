@@ -8,7 +8,7 @@
 [![TypeScript 5](https://img.shields.io/badge/TypeScript_5-007ACC?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![WebRTC WHEP](https://img.shields.io/badge/WebRTC-WHEP_Sub--250ms-333333?style=for-the-badge&logo=webrtc&logoColor=white)](https://www.ietf.org/archive/id/draft-murillo-whep-03.html)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![YOLOv8 ONNX](https://img.shields.io/badge/YOLOv8n-ONNX_Runtime-FF6F00?style=for-the-badge&logo=onnx&logoColor=white)](https://onnxruntime.ai/)
+[![YOLOv8s ONNX](https://img.shields.io/badge/YOLOv8s-ONNX_Runtime-FF6F00?style=for-the-badge&logo=onnx&logoColor=white)](https://onnxruntime.ai/)
 [![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL_16-316192?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 
@@ -26,7 +26,7 @@ Designed around the constraints of edge hardware, **Command** decouples ultra-lo
 
 ## 📸 Tactical Interface Showcase
 
-> *Screenshot below reflects the live multi-camera deployment running on Debian Linux (`bossman`).*
+> *Screenshot below reflects the live multi-camera deployment running on bare-metal Debian Linux.*
 
 | **3-Camera Tactical Matrix & Kill-Feed Rail** |
 | :---: | :---: |
@@ -36,52 +36,57 @@ Designed around the constraints of edge hardware, **Command** decouples ultra-lo
 
 ## 🏗️ System Architecture
 
+> 📄 **[Download Full 3-Page System Architecture Specification (PDF)](docs/NasonNation_Command_Architecture_Portfolio.pdf)** — *Includes distributed topology, 6-stage AI/biometric pipeline, role-based alert matrix, and dual-disk NAND wear-isolation design.*
+
 ```mermaid
-flowchart TB
-    subgraph Cameras["Isolated IP Camera Subnet (LAN-to-WAN Blocked)"]
-        C1["Annke IP Cam (RTSP/TCP)"]
-        C2["Tapo C113 #1 (RTSP/TCP)"]
-        C3["Tapo C113 #2 (RTSP/TCP)"]
+flowchart LR
+    subgraph Cameras["Edge Camera Array (ONVIF / RTSP H.264)"]
+        C1["PERIMETER (cam_ext_01) - 24/7 Active + Road Mask + Bumper LPR"]
+        C2["INTERIOR_A (cam_int_01) - Configurable Schedule + IR Stream"]
+        C3["INTERIOR_B (cam_int_02) - Configurable Schedule + IR Stream"]
     end
 
-    subgraph Debian["Debian Linux Server ('bossman' - Docker Bridge: command-net)"]
-        MTX["command-mediamtx<br/>(RTSP Ingest & WHEP Server)"]
-        
-        subgraph Backend["command-backend (FastAPI / Python 3.12)"]
-            FG["LatestFrameGrabber<br/>(Zero-Queue RTSP Drainer)"]
-            MOG["OpenCV MOG2 Motion Gate<br/>+ Polygon Zone Filter"]
-            YOLO["YOLOv8n ONNX Engine<br/>+ Euclidean Centroid Tracker"]
-            AGENT["Command AI Orchestrator<br/>(Tool Calling & VLM Router)"]
-            WS["Async WebSocket Broadcaster<br/>(6.6Hz Telemetry & BBoxes)"]
+    subgraph Host["Edge Docker Host (192.168.1.x - Debian Linux / Core i5-6400 / 16GB RAM)"]
+        MTX["command-mediamtx (:8554 RTSP | :8889 WHEP | :8189 ICE UDP)"]
+
+        subgraph Backend["command-backend (FastAPI :8080 REST + WebSocket)"]
+            FG["LatestFrameGrabber (48-Frame 5s Clip Ring Buffer)"]
+            MOG["OpenCV MOG2 Motion Gate + Polygon Exclusion/Tripwire"]
+            YOLO["YOLOv8s ONNX + TrueDisplacement & ParkedVehicleRegistry"]
+            FACE["FaceEngine (YuNet + SFace 128-D Cosine Biometrics & RBAC)"]
+            ORCH["AI Orchestrator (VLM Deep Inspect, LPR & HITL Active Teach)"]
+            CONSOL["Best-Confidence Encounter Consolidator (4.5s Window / 90s Cooldown)"]
+            MAINT["6h Self-Healing Worker (Quota, Prune, VACUUM & DR Backups)"]
         end
 
-        PG[("command-postgres<br/>(PostgreSQL 16 + asyncpg)")]
-        SNAP[("Snapshot Volume<br/>(Target Crops & Full Frames)")]
-        UI["command-frontend<br/>(Nginx + React 18 / TS / Vite)"]
+        PG[("command-postgres (:5432 PostgreSQL 16 - Tier 1 SATA SSD)")]
+        HDD[("Tier 2 1TB 7200RPM HDD (Snapshots, 5s MP4s, Face Crops & 7d Backups)")]
+        UI["command-frontend (:3000 React + TypeScript + Nginx)"]
     end
 
-    subgraph Compute["Hybrid AI Inference Tier"]
-        GPU["Workstation RTX 3060 Ti<br/>(LAN Ollama LLM / VLM)"]
-        CLOUD["Cloud API Fallback<br/>(When Workstation Offline)"]
+    subgraph RemoteAI["Dedicated LAN GPU Node (192.168.1.y:11434)"]
+        VLM["NVIDIA RTX 3060 Ti - Ollama (qwen2.5vl:7b VLM + Plate OCR & qwen2.5:3b)"]
     end
 
-    subgraph Client["Operator Workstation Browser"]
-        VIEW["React Tactical HUD<br/>• Direct UDP:8189 WebRTC Video<br/>• SVG Trajectory & Reticle Overlay<br/>• Hardware CSS Digital PTZ"]
+    subgraph External["Outbound Mobile Alerting (0 Open Inbound Ports)"]
+        PUSH["Multipart HTTPS Webhook (Conf % + Target/Plate Crops + 5s MP4 Clip)"]
     end
 
-    C1 & C2 & C3 -->|RTSP Interleaved TCP| MTX
-    MTX ==>|Encrypted DTLS-SRTP UDP:8189| VIEW
-    MTX -->|Internal RTSP Pull| FG
-    FG --> MOG --> YOLO
-    YOLO --> WS
-    YOLO -->|Async Event Queue| PG
-    YOLO -->|JPEG Crop + Full Frame| SNAP
-    WS ==>|WebSocket :8080| VIEW
-    SNAP -->|Static HTTP| VIEW
-    VIEW <-->|Natural Language & Deep Inspect| AGENT
-    AGENT -->|Primary Gigabit LAN| GPU
-    AGENT -.->|Auto-Failover| CLOUD
-    AGENT <-->|Parameterized SQL| PG
+    subgraph Client["Operator Web Client"]
+        VIEW["React Tactical Matrix (Sub-250ms WebRTC, Per-Cam Alert Policy, 1-Click TEACH & 24h Heatmap)"]
+    end
+
+    C1 & C2 & C3 -->|"RTSP TCP"| MTX
+    MTX ==>|"DTLS-SRTP UDP :8189"| VIEW
+    MTX -->|"Internal RTSP"| FG
+    FG --> MOG --> YOLO --> FACE --> ORCH
+    YOLO & ORCH <-->|"Async SQL"| PG
+    FG & FACE & MAINT -->|"Sequential I/O"| HDD
+    MAINT -->|"VACUUM & Prune"| PG
+    ORCH <-->|"LAN HTTP"| VLM
+    ORCH --> CONSOL -->|"Outbound TLS"| PUSH
+    UI <-->|"HTTP :3000"| VIEW
+    ORCH <-->|"6.6Hz WS Telemetry & REST :8080"| VIEW
 ```
 
 ---
