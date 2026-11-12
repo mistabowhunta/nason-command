@@ -36,31 +36,32 @@ Designed around the constraints of edge hardware, **Command** decouples ultra-lo
 
 ## 🏗️ System Architecture
 
-> 📄 **[Download Full 3-Page System Architecture Specification (PDF)](docs/NasonNation_Command_Architecture_Portfolio.pdf)** — *Includes distributed topology, 6-stage AI/biometric pipeline, role-based alert matrix, and dual-disk NAND wear-isolation design.*
+> 📄 **[Download Full 3-Page System Architecture Specification (PDF)](docs/NasonNation_Command_Architecture_Portfolio.pdf)** — *Includes distributed topology, 6-stage AI/biometric pipeline, 2-way outbound Discord Gateway C2, role-based alert matrix, and dual-disk NAND wear-isolation design.*
 
 ```mermaid
 flowchart LR
     subgraph Cameras["Edge Camera Array (ONVIF / RTSP H.264)"]
         C1["PERIMETER (cam_ext_01) - 24/7 Active + Road Mask + Bumper LPR"]
-        C2["INTERIOR_A (cam_int_01) - Configurable Schedule + IR Stream"]
-        C3["INTERIOR_B (cam_int_02) - Configurable Schedule + IR Stream"]
+        C2["INTERIOR_A (cam_int_01) - Configurable Schedule / Away 24/7"]
+        C3["INTERIOR_B (cam_int_02) - Configurable Schedule / Away 24/7"]
     end
 
     subgraph Host["Edge Docker Host (192.168.1.x - Debian Linux / Core i5-6400 / 16GB RAM)"]
         MTX["command-mediamtx (:8554 RTSP | :8889 WHEP | :8189 ICE UDP)"]
 
         subgraph Backend["command-backend (FastAPI :8080 REST + WebSocket)"]
-            FG["LatestFrameGrabber (48-Frame 5s Clip Ring Buffer)"]
+            FG["LatestFrameGrabber (48-Frame 5s Clip Ring Buffer + 90s Watchdog)"]
             MOG["OpenCV MOG2 Motion Gate + Polygon Exclusion/Tripwire"]
             YOLO["YOLOv8s ONNX + TrueDisplacement & ParkedVehicleRegistry"]
             FACE["FaceEngine (YuNet + SFace 128-D Cosine Biometrics & RBAC)"]
-            ORCH["AI Orchestrator (VLM Deep Inspect, LPR & HITL Active Teach)"]
-            CONSOL["Best-Confidence Encounter Consolidator (4.5s Window / 90s Cooldown)"]
-            MAINT["6h Self-Healing Worker (Quota, Prune, VACUUM & DR Backups)"]
+            ORCH["AI Orchestrator (VLM Deep Inspect, False-Alarm Purge, LPR & HITL Teach)"]
+            CONSOL["Best-Confidence Consolidator (4.5s Burst Window / 90s Cooldown)"]
+            WATCH["Posture & Health Worker (1-Click Away Mode, Dropout Alerts & Silent Sitrep)"]
+            MAINT["6h Self-Healing Worker (30GB Quota, 14d Prune, VACUUM & DR Backups)"]
         end
 
         PG[("command-postgres (:5432 PostgreSQL 16 - Tier 1 SATA SSD)")]
-        HDD[("Tier 2 1TB 7200RPM HDD (Snapshots, 5s MP4s, Face Crops & 7d Backups)")]
+        HDD[("Tier 2 1TB 7200RPM HDD (30GB Media Quota, 5s MP4s, Crops & 7d Backups)")]
         UI["command-frontend (:3000 React + TypeScript + Nginx)"]
     end
 
@@ -68,30 +69,35 @@ flowchart LR
         VLM["NVIDIA RTX 3060 Ti - Ollama (qwen2.5vl:7b VLM + Plate OCR & qwen2.5:3b)"]
     end
 
-    subgraph External["Outbound Mobile Alerting (0 Open Inbound Ports)"]
-        PUSH["Multipart HTTPS Webhook (Conf % + Target/Plate Crops + 5s MP4 Clip)"]
+    subgraph External["Zero-Inbound-Port Mobile C2 & Alerting"]
+        PUSH["Multipart HTTPS Webhook (Full Scene + Target/Plate Crops + 5s MP4)"]
+        BOT["2-Way Discord Gateway v10 Bot (/snap, /away, /mute, /status & Auto-Pinned Cheat Sheet)"]
     end
 
     subgraph Client["Operator Web Client"]
-        VIEW["React Tactical Matrix (Sub-250ms WebRTC, Per-Cam Alert Policy, 1-Click TEACH & 24h Heatmap)"]
+        VIEW["React Tactical Matrix (Sub-250ms WebRTC, 1-Click Away Mode, HITL Teach & 24h Heatmap)"]
     end
 
     C1 & C2 & C3 -->|"RTSP TCP"| MTX
     MTX ==>|"DTLS-SRTP UDP :8189"| VIEW
     MTX -->|"Internal RTSP"| FG
     FG --> MOG --> YOLO --> FACE --> ORCH
+    FG -.->|"Stream Health"| WATCH
     YOLO & ORCH <-->|"Async SQL"| PG
     FG & FACE & MAINT -->|"Sequential I/O"| HDD
     MAINT -->|"VACUUM & Prune"| PG
-    ORCH <-->|"LAN HTTP"| VLM
+    ORCH <-->|"LAN HTTP (30s Failover Cache)"| VLM
     ORCH --> CONSOL -->|"Outbound TLS"| PUSH
+    WATCH -->|"Silent Sitrep & Watchdog"| PUSH
+    WATCH <-->|"Outbound WSS v10"| BOT
+    FG -.->|"On-Demand /snap"| BOT
     UI <-->|"HTTP :3000"| VIEW
     ORCH <-->|"6.6Hz WS Telemetry & REST :8080"| VIEW
 ```
 
 ---
 
-## 🎯 Core Capabilities (The 5 Tactical Pillars)
+## 🎯 Core Capabilities (The 6 Tactical Pillars)
 
 ### 1. Tactical Corner-Bracket Reticles & Centroid Vector Trails
 * **Euclidean Centroid Slot Locking:** `CameraMotionTracker` matches moving objects across frames by normalized Euclidean distance so `Motion_1` stays locked onto the same physical entity without ID swapping.
@@ -111,10 +117,14 @@ flowchart LR
   * **Exclusion Masks (Red):** Suppresses false-positive motion/detections inside designated static regions before inference.
   * **Tripwire Perimeters (Amber):** Triggers high-priority visual/audible alerts when a `person` or `vehicle` centroid breaches a protected polygon.
 
-### 5. Hybrid RTX 3060 Ti VLM "Deep Inspect" & Command AI Agent
-* **Parasitic LAN GPU Offload with Cloud Failover:** The Debian server stays lightweight by offloading heavy LLM/Vision-Language Model (VLM) inference over gigabit LAN to an **NVIDIA RTX 3060 Ti** running **Ollama** (`llama3.2-vision` / `qwen2.5`), automatically failing over to cloud APIs if the workstation is asleep.
-* **Asynchronous Target Enrichment ("Deep Inspect"):** Clicking **Inspect** on any Kill-Feed event (or triggering auto-enrichment) sends the high-res target crop to the VLM to generate detailed natural-language descriptions (e.g., *"White 4-door SUV traveling eastbound"*, *"Adult male in dark jacket carrying parcel"*).
-* **Deterministic Agent Tool Calling:** Natural-language terminal bar capable of executing parameterized SQL event searches, switching camera layouts/PTZ locks via WebSocket commands, and dispatching MQTT/MAVLink hardware telemetry commands.
+### 5. Hybrid RTX 3060 Ti VLM "Deep Inspect" & Active Human-in-the-Loop Learning
+* **Parasitic LAN GPU Offload with Edge Failover:** The Debian server stays lightweight by offloading multimodal Vision-Language Model (VLM) inference and license plate OCR over gigabit LAN to an **NVIDIA RTX 3060 Ti** running **Ollama** (`qwen2.5vl:7b` / `qwen2.5:3b`), caching probe state and gracefully degrading to local `YOLOv8s + YuNet/SFace` edge captions if the GPU workstation is asleep.
+* **VLM False-Alarm Purging & 1-Click Active `TEACH`:** Automatically purges inanimate false triggers (`valid_target == false`) before mobile alerts fire, while 1-click corrective UI presets enroll 128-D facial embeddings and inject camera-specific visual rules into subsequent VLM prompts.
+
+### 6. Zero-Port-Forwarding 2-Way Mobile C2, 1-Click `AWAY MODE` & Stream Watchdog
+* **Outbound Discord Gateway v10 Bot (`0` Open Router Ports):** Connects outbound over encrypted WebSocket (`wss://gateway.discord.gg`) scoped strictly to a private guild ID—registering mobile Slash Commands (`/snap`, `/away`, `/mute`, `/unmute`, `/status`, `/sitrep`, `/help`) alongside a SHA-256 hashed, self-updating pinned Command Cheat Sheet.
+* **Non-Destructive `AWAY MODE` & Encounter Consolidation:** Arms 24/7 multi-camera recording and full-property alerting with a configurable exit grace timer while preserving saved Home schedules, consolidating multi-frame encounters into a single highest-confidence Discord push containing wide-scene JPEG, close-up crop, plate crop, and 5-second H.264 MP4 replay.
+* **Self-Healing Watchdog & Silent Daily Sitrep:** Monitors RTSP frame starvation (>90s dropout/recovery alerts), dispatches a scheduled silent multi-camera Sitrep (`SUPPRESS_NOTIFICATIONS`), and runs a 6-hour maintenance loop enforcing a 30 GB Tier-2 HDD media quota, 14-day pruning, `VACUUM ANALYZE`, and rolling `.json.gz` disaster-recovery backups.
 
 ---
 
@@ -125,7 +135,7 @@ flowchart LR
 2. **Eliminating RTSP Buffer Lag During CPU Inference:**
    Standard `cv2.VideoCapture.read()` loops block while ONNX inference executes, causing TCP RTSP buffers to accumulate multi-second delays. Solved by decoupling stream ingestion into a dedicated `LatestFrameGrabber` daemon thread per camera that continuously drains the socket, guaranteeing the CV worker always evaluates the `0ms` live frame.
 3. **Preventing Event-Loop & Media Starvation on 4-Core Hardware:**
-   Capped OpenCV internal threads (`cv2.setNumThreads(1)`), gated YOLOv8n execution behind an ultra-fast `0.5ms` `MOG2` pixel-motion check, serialized ONNX Runtime calls with a thread lock (`intra_op_num_threads=2`) and offloaded PostgreSQL `asyncpg` writes to a non-blocking `asyncio.Queue`.
+   Capped OpenCV internal threads (`cv2.setNumThreads(1)`), gated `YOLOv8s` execution behind an ultra-fast `0.5ms` `MOG2` pixel-motion check, serialized ONNX Runtime calls with a thread lock (`intra_op_num_threads=2`), isolated sequential MP4/snapshot writes onto a dedicated 1 TB HDD (`/dev/sdb1`) to eliminate boot-SSD wear, and offloaded PostgreSQL `asyncpg` writes to a non-blocking `asyncio.Queue`.
 
 ---
 

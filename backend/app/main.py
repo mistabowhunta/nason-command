@@ -17,10 +17,26 @@ from sqlalchemy import select, delete, text
 from app.api.ws import router as ws_router, telemetry_and_cv_broadcaster
 from app.db.session import init_db, AsyncSessionLocal
 from app.db.models import DetectionEvent, CameraZone, CameraSchedule, KnownFace, PushSettings
-from app.services.cv_pipeline import EdgeCVEngine, db_persistence_worker, periodic_maintenance_worker, SNAPSHOT_DIR, get_snapshots_storage_mb
+from app.services.cv_pipeline import (
+    EdgeCVEngine,
+    db_persistence_worker,
+    periodic_maintenance_worker,
+    health_and_sitrep_worker,
+    build_and_send_sitrep,
+    SNAPSHOT_DIR,
+    get_snapshots_storage_mb,
+)
 from app.services.face_engine import face_engine, FACE_CROPS_DIR
 from app.services.watchlist_scraper import periodic_watchlist_worker, sync_public_mugshot_feeds
 from app.services.push_notifier import get_push_config, send_tactical_push
+from app.services.discord_bot import (
+    discord_bot_worker,
+    discord_bot_state,
+    notify_bot_config_changed,
+    set_away_mode_db,
+    set_mute_minutes_db,
+    sync_discord_cheatsheet,
+)
 from app.agent.orchestrator import deep_inspect_detection, process_command_prompt
 
 STREAMS = ["annke_1", "tapo_1", "tapo_2"]
@@ -73,9 +89,21 @@ class PushConfigDTO(BaseModel):
     enabled: bool
     ntfy_topic: str
     discord_webhook: str
+    discord_bot_token: str | None = None
     notify_breach: bool
     notify_watchlist: bool
     notify_delivery: bool
+    daily_sitrep_enabled: bool = True
+    daily_sitrep_time: str = "05:00"
+
+
+class AwayModeDTO(BaseModel):
+    away_mode: bool
+    grace_seconds: int = 180
+
+
+class MuteDTO(BaseModel):
+    minutes: int = 60
 
 
 class AgentCommandDTO(BaseModel):
@@ -134,6 +162,8 @@ async def lifespan(app: FastAPI):
 
     cv_engine = EdgeCVEngine(streams=STREAMS, event_queue=event_queue, loop=loop)
     app.state.cv_engine = cv_engine
+    init_push = await get_push_config()
+    cv_engine.set_away_and_mute_state(init_push.away_mode, init_push.away_armed_at, init_push.mute_until)
     await sync_zones_to_engine(cv_engine)
     await sync_schedules_to_engine(cv_engine)
     cv_engine.start()
@@ -142,12 +172,16 @@ async def lifespan(app: FastAPI):
     db_task = asyncio.create_task(db_persistence_worker(event_queue))
     scraper_task = asyncio.create_task(periodic_watchlist_worker())
     maint_task = asyncio.create_task(periodic_maintenance_worker())
+    health_task = asyncio.create_task(health_and_sitrep_worker(cv_engine))
+    bot_task = asyncio.create_task(discord_bot_worker(cv_engine))
     yield
     cv_engine.stop()
     ws_task.cancel()
     db_task.cancel()
     scraper_task.cancel()
     maint_task.cancel()
+    health_task.cancel()
+    bot_task.cancel()
 
 
 app = FastAPI(title="NasonNation | Command API", lifespan=lifespan)
@@ -178,13 +212,21 @@ async def health_check():
 @app.get("/api/push/settings")
 async def read_push_settings():
     cfg = await get_push_config()
+    now = time.time()
     return {
         "enabled": cfg.enabled,
         "ntfy_topic": cfg.ntfy_topic,
         "discord_webhook": cfg.discord_webhook,
+        "discord_bot_token": getattr(cfg, "discord_bot_token", "") or "",
         "notify_breach": cfg.notify_breach,
         "notify_watchlist": cfg.notify_watchlist,
         "notify_delivery": cfg.notify_delivery,
+        "away_mode": bool(getattr(cfg, "away_mode", False)),
+        "away_grace_remaining": max(0, int(round((getattr(cfg, "away_armed_at", 0.0) or 0.0) - now))) if getattr(cfg, "away_mode", False) else 0,
+        "mute_remaining": max(0, int(round((getattr(cfg, "mute_until", 0.0) or 0.0) - now))),
+        "daily_sitrep_enabled": bool(getattr(cfg, "daily_sitrep_enabled", True)),
+        "daily_sitrep_time": getattr(cfg, "daily_sitrep_time", "05:00") or "05:00",
+        "bot_status": discord_bot_state,
     }
 
 
@@ -198,16 +240,47 @@ async def save_push_settings(payload: PushConfigDTO):
         cfg.enabled = payload.enabled
         cfg.ntfy_topic = payload.ntfy_topic.strip()
         cfg.discord_webhook = payload.discord_webhook.strip()
+        if payload.discord_bot_token is not None:
+            cfg.discord_bot_token = payload.discord_bot_token.strip()
         cfg.notify_breach = payload.notify_breach
         cfg.notify_watchlist = payload.notify_watchlist
         cfg.notify_delivery = payload.notify_delivery
+        cfg.daily_sitrep_enabled = payload.daily_sitrep_enabled
+        cfg.daily_sitrep_time = (payload.daily_sitrep_time or "05:00").strip()
         await session.commit()
+    notify_bot_config_changed()
     return await read_push_settings()
+
+
+@app.post("/api/away")
+async def toggle_away_mode_endpoint(payload: AwayModeDTO):
+    state = await set_away_mode_db(app.state.cv_engine, payload.away_mode, payload.grace_seconds)
+    schedules = await sync_schedules_to_engine(app.state.cv_engine)
+    return {**state, "schedules": schedules}
+
+
+@app.post("/api/push/mute")
+async def mute_push_endpoint(payload: MuteDTO):
+    return await set_mute_minutes_db(app.state.cv_engine, payload.minutes)
+
+
+@app.post("/api/push/sitrep")
+async def trigger_manual_sitrep():
+    return await build_and_send_sitrep(
+        app.state.cv_engine,
+        silent=True,
+        header="📸 ON-DEMAND SILENT SITREP // BOSSMAN",
+    )
+
+
+@app.post("/api/push/cheatsheet")
+async def trigger_discord_cheatsheet():
+    return await sync_discord_cheatsheet(force_new=True)
 
 
 @app.post("/api/push/test")
 async def trigger_test_push():
-    crop_path, plate_path, clip_path, conf = None, None, None, 0.96
+    crop_path, full_path, plate_path, clip_path, conf = None, None, None, None, 0.96
     async with AsyncSessionLocal() as session:
         res = await session.execute(select(DetectionEvent).order_by(DetectionEvent.timestamp.desc()).limit(1))
         latest = res.scalar_one_or_none()
@@ -215,18 +288,21 @@ async def trigger_test_push():
             snap_id = latest.attributes.split("|")[0].strip()
             if snap_id:
                 crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}"
+                full_path = f"{SNAPSHOT_DIR}/full_{snap_id}"
                 plate_path = f"{SNAPSHOT_DIR}/plate_{snap_id}"
                 clip_path = f"{SNAPSHOT_DIR}/clip_{snap_id}.mp4"
                 conf = latest.confidence
     return await send_tactical_push(
         title="🛡️ NASONNATION // COMMAND TEST",
-        message="Tactical Push Alert link verified from node BOSSMAN (192.168.1.27) — Rich Image + 5s MP4 Clip enabled.",
+        message="Tactical Push Alert link verified from node BOSSMAN (192.168.1.27) — Wide Scene + Crop + 5s MP4 Clip enabled.",
         crop_path=crop_path,
+        full_path=full_path,
         plate_path=plate_path,
         clip_path=clip_path,
         confidence=conf,
         priority="high",
         tags="white_check_mark,shield",
+        bypass_mute=True,
     )
 
 

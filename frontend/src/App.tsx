@@ -44,12 +44,21 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    fetch(`http://${HOST_IP}:8080/api/cameras/schedules`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setSchedules(data);
+      })
+      .catch(() => {});
+  }, [telemetry?.away_mode]);
+
   const primaryCam = CAMERAS.find((c) => c.streamName === focusedStream);
   const secondaryCams = CAMERAS.filter((c) => c.streamName !== focusedStream);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col pb-12 lg:pb-0">
-      <StatusHeader telemetry={telemetry} status={status} />
+      <StatusHeader telemetry={telemetry} status={status} onSchedulesChanged={setSchedules} />
 
       <div className="flex-1 flex overflow-hidden">
         {/* Main Viewport */}

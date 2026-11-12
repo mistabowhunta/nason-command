@@ -557,14 +557,16 @@ export function VideoTile({
                 onClick={() => setShowSchedModal((prev) => !prev)}
                 title="Configure Recording / Pause Schedule"
                 className={`px-1.5 py-1 rounded text-[10px] font-mono font-bold border flex items-center gap-1 cursor-pointer transition-colors ${
-                  !isRecordingNow
+                  schedule?.away_override
+                    ? 'bg-amber-600 text-white border-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.45)]'
+                    : !isRecordingNow
                     ? 'bg-amber-950/90 text-amber-300 border-amber-500/60'
                     : schedule?.mode === 'schedule'
                     ? 'bg-sky-950/90 text-sky-300 border-sky-500/50'
                     : 'bg-zinc-950/85 hover:bg-zinc-800 text-emerald-400 border-zinc-800'
                 }`}
               >
-                {schedule?.mode === 'schedule' ? (
+                {schedule?.mode === 'schedule' && !schedule?.away_override ? (
                   <Clock className="w-3 h-3" />
                 ) : isRecordingNow ? (
                   <Database className="w-3 h-3" />
@@ -572,7 +574,9 @@ export function VideoTile({
                   <PauseCircle className="w-3 h-3" />
                 )}
                 <span>
-                  {schedule?.mode === 'schedule'
+                  {schedule?.away_override
+                    ? 'AWAY·24/7'
+                    : schedule?.mode === 'schedule'
                     ? isRecordingNow
                       ? 'SCHED·REC'
                       : 'SCHED·PAUSED'

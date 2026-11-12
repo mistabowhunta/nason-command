@@ -31,6 +31,24 @@ async def init_db():
             text("ALTER TABLE camera_schedules ADD COLUMN IF NOT EXISTS alert_whitelist BOOLEAN DEFAULT FALSE")
         )
         await conn.execute(
+            text("ALTER TABLE push_settings ADD COLUMN IF NOT EXISTS discord_bot_token TEXT DEFAULT ''")
+        )
+        await conn.execute(
+            text("ALTER TABLE push_settings ADD COLUMN IF NOT EXISTS away_mode BOOLEAN DEFAULT FALSE")
+        )
+        await conn.execute(
+            text("ALTER TABLE push_settings ADD COLUMN IF NOT EXISTS away_armed_at DOUBLE PRECISION DEFAULT 0.0")
+        )
+        await conn.execute(
+            text("ALTER TABLE push_settings ADD COLUMN IF NOT EXISTS mute_until DOUBLE PRECISION DEFAULT 0.0")
+        )
+        await conn.execute(
+            text("ALTER TABLE push_settings ADD COLUMN IF NOT EXISTS daily_sitrep_enabled BOOLEAN DEFAULT TRUE")
+        )
+        await conn.execute(
+            text("ALTER TABLE push_settings ADD COLUMN IF NOT EXISTS daily_sitrep_time VARCHAR(10) DEFAULT '05:00'")
+        )
+        await conn.execute(
             text(
                 "INSERT INTO camera_schedules (camera_id, mode, start_time, end_time, alert_whitelist) "
                 "VALUES ('tapo_1', 'schedule', '23:30', '05:00', FALSE), "

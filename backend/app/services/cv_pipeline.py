@@ -22,7 +22,8 @@ LOCAL_TZ = ZoneInfo("America/Los_Angeles")
 RTSP_BASE = os.getenv("MEDIAMTX_RTSP_BASE", "rtsp://mediamtx:8554")
 MODEL_PATH = "/app/models/yolov8s.onnx" if os.path.exists("/app/models/yolov8s.onnx") else "/app/models/yolov8n.onnx"
 SNAPSHOT_DIR = "/tmp/command_snapshots"
-MAX_STORAGE_BYTES = 2048 * 1024 * 1024
+MAX_STORAGE_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB quota on 1TB HDD (/dev/sdb1)
+MAX_SNAPSHOT_AGE_SEC = 14 * 86400            # 14-day media retention matching DB pruning
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
 YOLO_CLASS_MAP: dict[int, tuple[str, str]] = {
@@ -50,7 +51,7 @@ def enforce_storage_limits():
     for path in glob.glob(f"{SNAPSHOT_DIR}/*"):
         try:
             st = os.stat(path)
-            if now - st.st_mtime > 604800:
+            if now - st.st_mtime > MAX_SNAPSHOT_AGE_SEC:
                 os.remove(path)
                 continue
             files.append((st.st_mtime, st.st_size, path))
@@ -176,10 +177,14 @@ class ParkedVehicleRegistry:
 
 
 class LatestFrameGrabber:
-    def __init__(self, rtsp_url: str):
+    def __init__(self, rtsp_url: str, stream_name: str = ""):
         self.rtsp_url = rtsp_url
+        self.stream_name = stream_name
+        self.started_at: float = time.time()
         self.frame: np.ndarray | None = None
         self.frame_time: float = 0.0
+        self.is_offline_alerted: bool = False
+        self.offline_since: float | None = None
         self.clip_buffer: deque[tuple[float, np.ndarray]] = deque(maxlen=48)
         self.last_buf_time: float = 0.0
         self.lock = threading.Lock()
@@ -402,8 +407,12 @@ class EdgeCVEngine:
         self.schedules: dict[str, dict] = {
             s: {"camera_id": s, "mode": "always_record", "start_time": "21:00", "end_time": "06:00", "alert_whitelist": False} for s in streams
         }
+        self.away_mode: bool = False
+        self.away_armed_at: float = 0.0
+        self.mute_until: float = 0.0
         self.zones_lock = threading.Lock()
         self.grabbers: list[LatestFrameGrabber] = []
+        self.grabber_map: dict[str, LatestFrameGrabber] = {}
         self.infer_lock = threading.Lock()
         self.last_storage_check = 0.0
 
@@ -424,18 +433,48 @@ class EdgeCVEngine:
                 if s in sched_map:
                     self.schedules[s] = dict(sched_map[s])
 
+    def set_away_and_mute_state(self, away_mode: bool, away_armed_at: float = 0.0, mute_until: float = 0.0):
+        with self.zones_lock:
+            self.away_mode = bool(away_mode)
+            self.away_armed_at = float(away_armed_at or 0.0)
+            self.mute_until = float(mute_until or 0.0)
+
     def get_schedules_status(self) -> dict[str, dict]:
         now_hm = datetime.now(LOCAL_TZ).strftime("%H:%M")
         with self.zones_lock:
-            return {s: {**cfg, "currently_recording": self._is_recording_unlocked(cfg, now_hm), "server_time": now_hm} for s, cfg in self.schedules.items()}
+            return {
+                s: {
+                    **cfg,
+                    "currently_recording": self._is_recording_unlocked(cfg, now_hm),
+                    "away_override": self.away_mode,
+                    "server_time": now_hm,
+                }
+                for s, cfg in self.schedules.items()
+            }
 
     def _is_recording_unlocked(self, cfg: dict, now_hm: str) -> bool:
+        if self.away_mode:
+            return True
         mode = cfg.get("mode", "always_record")
         if mode == "paused":
             return False
         if mode == "schedule":
             return is_within_time_window(now_hm, cfg.get("start_time", "21:00"), cfg.get("end_time", "06:00"))
         return True
+
+    def capture_live_jpeg_bytes(self, stream_name: str, stamp_label: str | None = None) -> bytes | None:
+        grabber = self.grabber_map.get(stream_name)
+        if not grabber:
+            return None
+        frm, f_ts = grabber.get_latest()
+        if frm is None or (time.time() - f_ts) > 30.0:
+            return None
+        vis = cv2.resize(frm, (1280, 720)) if frm.shape[1] > 1280 else frm.copy()
+        if stamp_label:
+            cv2.rectangle(vis, (12, 12), (min(vis.shape[1] - 12, 18 + len(stamp_label) * 11), 46), (12, 14, 18), -1)
+            cv2.putText(vis, stamp_label, (22, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (52, 211, 153), 2, cv2.LINE_AA)
+        ok, enc = cv2.imencode(".jpg", vis, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        return enc.tobytes() if ok else None
 
     def is_camera_recording(self, camera_id: str) -> bool:
         now_hm = datetime.now(LOCAL_TZ).strftime("%H:%M")
@@ -527,8 +566,9 @@ class EdgeCVEngine:
                 encode_mp4_replay_async(grabber, snap_id, now_ts)
 
     def _worker(self, stream_name: str):
-        grabber = LatestFrameGrabber(f"{RTSP_BASE}/{stream_name}")
+        grabber = LatestFrameGrabber(f"{RTSP_BASE}/{stream_name}", stream_name=stream_name)
         self.grabbers.append(grabber)
+        self.grabber_map[stream_name] = grabber
         bg_sub = cv2.createBackgroundSubtractorMOG2(history=400, varThreshold=20, detectShadows=False)
         tracker = TrueDisplacementTracker()
         parked_registry = ParkedVehicleRegistry()
@@ -706,9 +746,13 @@ async def periodic_maintenance_worker():
                             "enabled": p.enabled,
                             "ntfy_topic": p.ntfy_topic,
                             "discord_webhook": p.discord_webhook,
+                            "discord_bot_token": getattr(p, "discord_bot_token", ""),
                             "notify_breach": p.notify_breach,
                             "notify_watchlist": p.notify_watchlist,
                             "notify_delivery": p.notify_delivery,
+                            "away_mode": bool(getattr(p, "away_mode", False)),
+                            "daily_sitrep_enabled": bool(getattr(p, "daily_sitrep_enabled", True)),
+                            "daily_sitrep_time": getattr(p, "daily_sitrep_time", "05:00"),
                         }
                         for p in push_res.scalars().all()
                     ],
@@ -744,3 +788,185 @@ async def periodic_maintenance_worker():
             print(f"[MAINTENANCE WARNING] {e}")
 
         await asyncio.sleep(21600)
+
+
+async def build_and_send_sitrep(
+    cv_engine: EdgeCVEngine,
+    silent: bool = True,
+    header: str = "🌅 DAILY 05:00 PT SILENT SITREP // BOSSMAN",
+) -> dict:
+    from sqlalchemy import select as _sel, func as _func
+    from app.api.ws import START_TIME as _START_TIME
+    from app.agent.orchestrator import probe_workstation_ollama, pick_best_vlm
+    from app.services.push_notifier import CAM_NAMES, get_push_config, send_discord_files
+
+    cfg = await get_push_config()
+    now_ts = time.time()
+    now_pt = datetime.now(LOCAL_TZ)
+    cutoff_24h = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    async with AsyncSessionLocal() as session:
+        cat_res = await session.execute(
+            _sel(DetectionEvent.category, _func.count(DetectionEvent.id))
+            .where(DetectionEvent.timestamp >= cutoff_24h)
+            .group_by(DetectionEvent.category)
+        )
+        counts_24h = {r[0]: r[1] for r in cat_res.all()}
+        breach_res = await session.execute(
+            _sel(_func.count(DetectionEvent.id)).where(
+                DetectionEvent.timestamp >= cutoff_24h,
+                DetectionEvent.full_label.like("%BREACH%"),
+            )
+        )
+        breaches_24h = breach_res.scalar() or 0
+
+    gpu_online, models = await probe_workstation_ollama()
+    vlm_name = pick_best_vlm(models) if gpu_online else None
+    uptime_s = max(0, int(now_ts - _START_TIME))
+    up_d, up_h, up_m = uptime_s // 86400, (uptime_s % 86400) // 3600, (uptime_s % 3600) // 60
+
+    cam_statuses = []
+    files_data: list[tuple[str, bytes, str]] = []
+    stamp_clock = now_pt.strftime("%H:%M:%S PT")
+    for s in cv_engine.streams:
+        friendly = CAM_NAMES.get(s, s.upper())
+        grabber = cv_engine.grabber_map.get(s)
+        age_s = (now_ts - grabber.frame_time) if (grabber and grabber.frame_time > 0) else 9999.0
+        if age_s < 15.0:
+            cam_statuses.append(f"{friendly}: LIVE")
+        else:
+            cam_statuses.append(f"{friendly}: OFFLINE ({int(age_s)}s)")
+        jpg_bytes = cv_engine.capture_live_jpeg_bytes(s, stamp_label=f"{friendly} // {stamp_clock}")
+        if jpg_bytes:
+            files_data.append((f"{s}_live.jpg", jpg_bytes, "image/jpeg"))
+
+    mode_str = "AWAY (24/7 ALL CAMS ARMED)" if cfg.away_mode else "HOME (Normal Schedules)"
+    mute_str = (
+        f"MUTED ({max(1, int(round((cfg.mute_until - now_ts) / 60.0)))}m left)"
+        if (cfg.mute_until or 0.0) > now_ts
+        else "ACTIVE"
+    )
+    gpu_str = f"ONLINE ({vlm_name})" if gpu_online else "SLEEP / EDGE-ONLY (YOLOv8s + SFace Active)"
+    storage_mb = get_snapshots_storage_mb()
+    tot_24h = sum(counts_24h.values())
+
+    lines = [
+        f"Time:     {now_pt.strftime('%Y-%m-%d %H:%M:%S %Z')}",
+        f"Posture:  {mode_str} | Push: {mute_str}",
+        f"Cameras:  {' | '.join(cam_statuses)}",
+        f"GPU Node: {gpu_str}",
+        f"Storage:  {storage_mb} MB / 30,720 MB HDD | Uptime: {up_d}d {up_h}h {up_m}m",
+        (
+            f"Last 24h: {tot_24h} events (Person: {counts_24h.get('person', 0)} | "
+            f"Delivery: {counts_24h.get('delivery', 0)} | Vehicle: {counts_24h.get('vehicle', 0)} | "
+            f"Animal: {counts_24h.get('animal', 0)} | Breaches: {breaches_24h})"
+        ),
+    ]
+    return await send_discord_files(title=header, lines=lines, files_data=files_data, silent=silent)
+
+
+async def health_and_sitrep_worker(cv_engine: EdgeCVEngine):
+    """
+    Monitors RTSP camera frame starvation (>90s dropout / recovery), sends a silent boot/power-recovery
+    card on real host restarts, and dispatches the daily 05:00 PT silent 3-camera visual sitrep.
+    """
+    from app.services.push_notifier import CAM_NAMES, get_push_config, send_tactical_push, send_discord_files
+
+    boot_marker = os.path.join(BACKUP_DIR, ".last_boot_ping")
+    sitrep_marker = os.path.join(BACKUP_DIR, ".last_sitrep_date")
+
+    await asyncio.sleep(25)
+    try:
+        from app.services.discord_bot import sync_discord_cheatsheet
+
+        cfg = await get_push_config()
+        cv_engine.set_away_and_mute_state(cfg.away_mode, cfg.away_armed_at, cfg.mute_until)
+        if (cfg.discord_webhook or "").startswith("http"):
+            await sync_discord_cheatsheet(force_new=False)
+        last_boot_ts = os.path.getmtime(boot_marker) if os.path.exists(boot_marker) else 0.0
+        if (time.time() - last_boot_ts) > 600.0 and (cfg.discord_webhook or "").startswith("http"):
+            with open(boot_marker, "w", encoding="utf-8") as bf:
+                bf.write(str(int(time.time())))
+            await build_and_send_sitrep(
+                cv_engine,
+                silent=True,
+                header="🟢 NODE ONLINE // BOSSMAN RECOVERED",
+            )
+    except Exception as e:
+        print(f"[BOOT SITREP WARNING] {e}")
+
+    while True:
+        try:
+            now = time.time()
+            cfg = await get_push_config()
+            cv_engine.set_away_and_mute_state(cfg.away_mode, cfg.away_armed_at, cfg.mute_until)
+
+            # 1. RTSP Stream Dropout / Recovery Watchdog (90s threshold)
+            for s in cv_engine.streams:
+                grabber = cv_engine.grabber_map.get(s)
+                if not grabber:
+                    continue
+                friendly = CAM_NAMES.get(s, s.upper())
+                ref_ts = grabber.frame_time if grabber.frame_time > 0 else grabber.started_at
+                stale_sec = now - ref_ts
+
+                if stale_sec > 90.0 and not grabber.is_offline_alerted:
+                    grabber.is_offline_alerted = True
+                    grabber.offline_since = now
+                    await send_tactical_push(
+                        title=f"🔌 CAMERA OFFLINE // {friendly}",
+                        message=f"No RTSP video frames received from {s} ({friendly}) for {int(stale_sec)}s. Auto-reconnecting...",
+                        priority="high",
+                        tags="warning,electric_plug",
+                        dedup_key=f"cam_offline:{s}",
+                        cooldown_sec=900.0,
+                    )
+                elif grabber.frame_time > 0 and (now - grabber.frame_time) < 6.0 and grabber.is_offline_alerted:
+                    down_min = max(1, int(round((now - (grabber.offline_since or now)) / 60.0)))
+                    grabber.is_offline_alerted = False
+                    grabber.offline_since = None
+                    jpg_bytes = cv_engine.capture_live_jpeg_bytes(
+                        s, stamp_label=f"{friendly} // RESTORED"
+                    )
+                    files = [(f"{s}_restored.jpg", jpg_bytes, "image/jpeg")] if jpg_bytes else []
+                    await send_discord_files(
+                        title=f"✅ CAMERA RESTORED // {friendly}",
+                        lines=[
+                            f"Camera:   {friendly} ({s})",
+                            f"Downtime: ~{down_min} min",
+                            "Status:   RTSP stream healthy & resuming edge CV",
+                        ],
+                        files_data=files,
+                        silent=True,
+                    )
+
+            # 2. Daily Silent Sitrep (default 05:00 PT, 30-min trigger window so restarts don't miss or double-fire)
+            if getattr(cfg, "daily_sitrep_enabled", True) and (cfg.discord_webhook or "").startswith("http"):
+                now_pt = datetime.now(LOCAL_TZ)
+                today_str = now_pt.strftime("%Y-%m-%d")
+                target_hm = (getattr(cfg, "daily_sitrep_time", "05:00") or "05:00").strip()
+                try:
+                    th, tm = [int(x) for x in target_hm.split(":")[:2]]
+                except Exception:
+                    th, tm = 5, 0
+                target_dt = now_pt.replace(hour=th, minute=tm, second=0, microsecond=0)
+                diff_sec = (now_pt - target_dt).total_seconds()
+
+                if 0 <= diff_sec <= 1800:
+                    last_sent_day = ""
+                    if os.path.exists(sitrep_marker):
+                        with open(sitrep_marker, "r", encoding="utf-8") as sf:
+                            last_sent_day = sf.read().strip()
+                    if last_sent_day != today_str:
+                        res = await build_and_send_sitrep(
+                            cv_engine,
+                            silent=True,
+                            header=f"🌅 DAILY {target_hm} PT SILENT SITREP // BOSSMAN",
+                        )
+                        if res.get("sent"):
+                            with open(sitrep_marker, "w", encoding="utf-8") as sf:
+                                sf.write(today_str)
+        except Exception as e:
+            print(f"[HEALTH WATCHDOG WARNING] {e}")
+
+        await asyncio.sleep(15)
