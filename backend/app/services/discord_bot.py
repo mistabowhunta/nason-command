@@ -186,6 +186,18 @@ def build_cheatsheet_embed() -> dict:
     ]
     fields.append(
         {
+            "name": "🎓 Kill-Feed AI Teaching & Biometrics Cheat Sheet",
+            "value": (
+                "• 🔴 **Stranger called `ISAAC`/`JENNIFER`** → Click `🎓 TEACH → 👤 STRANGER` *(purges bad face vector)*\n"
+                "• 🟡 **You/Family from behind (hoodie/hat) called `person`** → **Leave alone** *(no face visible)*\n"
+                "• 🟢 **Delivery / Landscapers / Cat mislabeled** → Click `🎓 TEACH` *(VLM learns from any angle)*\n"
+                "• 📤 **Best Family Enrollment** → Use `FACE GALLERY → UPLOAD` with 1–2 crisp phone portraits"
+            ),
+            "inline": False,
+        }
+    )
+    fields.append(
+        {
             "name": "🤖 Automated Background Watchdogs",
             "value": (
                 "• **`05:00 PT Daily`** — Silent 3-camera visual Sitrep (`SUPPRESS_NOTIFICATIONS`, zero buzz)\n"

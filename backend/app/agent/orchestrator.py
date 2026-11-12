@@ -78,6 +78,57 @@ def _is_whitelist_family_event(sub_type: str | None, full_label: str | None, fac
     return False
 
 
+def _same_subject_track(ev: DetectionEvent, other: DetectionEvent) -> bool:
+    if ev.id == other.id:
+        return True
+    dt = abs((ev.timestamp - other.timestamp).total_seconds()) if (ev.timestamp and other.timestamp) else 999.0
+    if ev.motion_slot and other.motion_slot and ev.motion_slot == other.motion_slot and dt <= 18.0:
+        return True
+    if dt <= 6.0:
+        ecx = float(ev.bbox_x or 0.0) + float(ev.bbox_w or 0.0) * 0.5
+        ecy = float(ev.bbox_y or 0.0) + float(ev.bbox_h or 0.0) * 0.5
+        ocx = float(other.bbox_x or 0.0) + float(other.bbox_w or 0.0) * 0.5
+        ocy = float(other.bbox_y or 0.0) + float(other.bbox_h or 0.0) * 0.5
+        if ((ecx - ocx) ** 2 + (ecy - ocy) ** 2) ** 0.5 < 0.20:
+            return True
+    return False
+
+
+def _point_in_poly(px: float, py: float, pts: list[dict]) -> bool:
+    n = len(pts)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(pts[i]["x"]), float(pts[i]["y"])
+        xj, yj = float(pts[j]["x"]), float(pts[j]["y"])
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / ((yj - yi) + 1e-9) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _event_touches_tripwire(ev: DetectionEvent, cam_zones: list[CameraZone]) -> bool:
+    bx, by, bw, bh = float(ev.bbox_x or 0.0), float(ev.bbox_y or 0.0), float(ev.bbox_w or 0.0), float(ev.bbox_h or 0.0)
+    probe_pts = [
+        (bx + bw * 0.5, by + bh * 0.95),
+        (bx + bw * 0.25, by + bh * 0.92),
+        (bx + bw * 0.75, by + bh * 0.92),
+        (bx + bw * 0.5, by + bh * 0.65),
+    ]
+    for z in cam_zones:
+        if z.zone_type != "tripwire":
+            continue
+        try:
+            pts = json.loads(z.points_json)
+        except Exception:
+            continue
+        if any(_point_in_poly(px, py, pts) for px, py in probe_pts):
+            return True
+    return False
+
+
 async def _evaluate_best_confidence_push(
     event_id: int,
     face_role: str | None = None,
@@ -122,17 +173,20 @@ async def _evaluate_best_confidence_push(
         in_away_grace = is_away and (now_ts < away_armed_at)
         away_active = is_away and not in_away_grace
 
-        # 1. Permanent ISAAC & Silent Service exemption across ±30s encounter window
-        for b in burst_events:
-            if _is_isaac_event(b.sub_type, b.full_label, b.ai_notes) or (b.sub_type or "").startswith("🔇 SERVICE:"):
-                return
+        # 1. Silent Service exemption across encounter window; ISAAC exemption scoped to same person/track
+        if any((b.sub_type or "").startswith("🔇 SERVICE:") for b in burst_events):
+            return
 
         if _is_isaac_event(ev.sub_type, ev.full_label, ev.ai_notes) or (ev.sub_type or "").startswith("🔇 SERVICE:"):
             return
 
-        # 2. Shield whitelisted family during normal Home Mode (when FAM·ALERT is OFF) OR during 3m Away exit grace
+        for b in burst_events:
+            if _same_subject_track(ev, b) and _is_isaac_event(b.sub_type, b.full_label, b.ai_notes):
+                return
+
+        # 2. Shield whitelisted family on the SAME person/track during normal Home Mode (never let Motion_1 silence a Motion_2 stranger breach)
         if (not away_active) and (not cam_alert_all) and ev.category == "person":
-            if any(_is_whitelist_family_event(b.sub_type, b.full_label) for b in burst_events):
+            if any(_same_subject_track(ev, b) and _is_whitelist_family_event(b.sub_type, b.full_label) for b in burst_events):
                 return
 
         def _cat_group(c: str | None) -> str:
@@ -350,16 +404,25 @@ async def deep_inspect_detection(event_id: int) -> dict:
             recognized_face = None
             face_role = None
             face_info = None
+            face_match_score = 0.0
+            had_breach = "BREACH" in (ev.full_label or "")
+
+            cam_zones_res = await session.execute(select(CameraZone).where(CameraZone.camera_id == ev.camera_id))
+            cam_zones = cam_zones_res.scalars().all()
+            in_tripwire = had_breach or (ev.category == "person" and _event_touches_tripwire(ev, cam_zones))
 
             if ev.category == "person" and os.path.exists(crop_path):
                 face_info = await face_engine.process_snapshot_biometrics(crop_path)
                 if face_info:
                     fname = face_info["name"]
                     face_role = face_info["role"]
+                    face_match_score = float(face_info.get("score") or 0.0)
                     fsightings = face_info["sightings"]
                     if face_role == "visitor":
                         recognized_face = f"{fname} (Seen {fsightings}x)"
                         ev.sub_type = f"ID: {fname} ({fsightings}x)"
+                        if in_tripwire and "BREACH" not in (ev.full_label or ""):
+                            ev.full_label = f"{ev.motion_slot}_person_BREACH"
                     elif face_role in ("watchlist", "watchlist_auto"):
                         recognized_face = f"⚠️ WATCHLIST: {fname} (Seen {fsightings}x)"
                         ev.sub_type = f"⚠️ WATCHLIST: {fname}"
@@ -367,7 +430,8 @@ async def deep_inspect_detection(event_id: int) -> dict:
                     else:
                         recognized_face = f"{fname} (Seen {fsightings}x)"
                         ev.sub_type = f"ID: {fname}"
-                        ev.full_label = f"{ev.motion_slot}_{fname}"
+                        breach_tail = "_BREACH" if (had_breach and face_match_score < 0.52) else ""
+                        ev.full_label = f"{ev.motion_slot}_{fname}{breach_tail}"
                 elif (ev.sub_type or "").startswith("ID: "):
                     pre_name = (ev.sub_type or "").replace("ID:", "").strip()
                     recognized_face = pre_name
@@ -411,8 +475,9 @@ async def deep_inspect_detection(event_id: int) -> dict:
                         "If a small four-legged animal is alone on the driveway/pavement with NO person or leash visible, classify sub_type as 'cat'. "
                         "If a vehicle is visible, inspect both the vehicle and bumper crop to read any legible license plate characters into 'plate' (or 'NONE'). "
                         f"If a delivery carrier or service crew (like LANDSCAPERS with mowers/blowers/vests/bandanas or AMAZON/UPS/FEDEX/USPS) is visible, set 'carrier' to one of {active_rule_names} (or 'NONE') and note if a package was left. "
+                        "Set 'face_visible' to true ONLY if a person's actual facial features (eyes/nose) are clearly visible in the image; set 'face_visible' to false if the person is walking away, only the back of their head/hoodie/backpack is visible, or their head is cropped out of frame. "
                         "Respond ONLY with valid JSON: "
-                        '{"valid_target": true, "category": "person|delivery|vehicle|animal|false_alarm", '
+                        '{"valid_target": true, "face_visible": false, "category": "person|delivery|vehicle|animal|false_alarm", '
                         '"sub_type": "short label like cat, dog, white suv, or person", '
                         '"plate": "ABC1234 or NONE", '
                         f'"carrier": "{"|".join(active_rule_names)}|NONE", '
@@ -434,11 +499,28 @@ async def deep_inspect_detection(event_id: int) -> dict:
                         if resp.status_code == 200:
                             parsed = extract_json_dict(resp.json().get("response", "{}"))
                             valid_target = bool(parsed.get("valid_target", True))
+                            face_visible = bool(parsed.get("face_visible", True))
                             vlm_cat = str(parsed.get("category") or ev.category).strip().lower()
                             summary = (parsed.get("summary") or "").strip()
                             carrier = (parsed.get("carrier") or "NONE").strip().upper()
                             plate = (parsed.get("plate") or "NONE").strip().upper()
                             vlm_sub = (parsed.get("sub_type") or "").strip().lower()
+
+                            # VLM Sanity Veto: if no face is visible (back of head, backpack, or waist-down crop),
+                            # strip any bogus/inherited biometric ID and restore tripwire BREACH if inside zone.
+                            if (
+                                ev.category == "person"
+                                and not face_visible
+                                and recognized_face
+                                and face_role not in ("watchlist", "watchlist_auto")
+                                and face_match_score < 0.56
+                            ):
+                                if face_info and face_info.get("auto_enrolled") and str(face_info.get("name", "")).startswith("VISITOR_"):
+                                    await session.execute(delete(_KnownFace).where(_KnownFace.name == face_info["name"]))
+                                recognized_face = None
+                                face_role = None
+                                ev.sub_type = "person"
+                                ev.full_label = f"{ev.motion_slot}_person{'_BREACH' if in_tripwire else ''}"
 
                             # Purge confirmed inanimate VLM false alarms before any alert can fire
                             if (not valid_target or vlm_cat == "false_alarm") and not recognized_face:

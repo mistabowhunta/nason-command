@@ -5,8 +5,9 @@ import { VideoTile } from './components/VideoTile';
 import { EvidenceRail } from './components/EvidenceRail';
 import { FaceGallery } from './components/FaceGallery';
 import { CommandPrompt } from './components/CommandPrompt';
+import { OperatorCheatSheetModal } from './components/OperatorCheatSheetModal';
 import type { CameraScheduleConfig, CameraZone } from './types/telemetry';
-import { Camera, Eye, LayoutGrid, PanelRightClose, PanelRightOpen, Users } from 'lucide-react';
+import { BookOpen, Camera, Eye, LayoutGrid, PanelRightClose, PanelRightOpen, Users } from 'lucide-react';
 
 const HOST_IP = window.location.hostname || '192.168.1.27';
 
@@ -21,6 +22,7 @@ export default function App() {
   const [focusedStream, setFocusedStream] = useState<string | null>(null);
   const [desktopView, setDesktopView] = useState<'matrix' | 'faces'>('matrix');
   const [showRail, setShowRail] = useState<boolean>(true);
+  const [showGuide, setShowGuide] = useState<boolean>(false);
   const [mobileTab, setMobileTab] = useState<'feeds' | 'killfeed' | 'faces'>('feeds');
   const [railRefresh, setRailRefresh] = useState<number>(0);
   const [zonesByCam, setZonesByCam] = useState<Record<string, CameraZone[]>>({});
@@ -96,7 +98,15 @@ export default function App() {
                 }`}
               >
                 <Users className="w-3.5 h-3.5" />
-                FACE GALLERY & WATCHLIST
+                FACE GALLERY &amp; WATCHLIST
+              </button>
+              <button
+                onClick={() => setShowGuide(true)}
+                title="Open Operator AI Teaching & Biometrics Cheat Sheet"
+                className="px-3 py-1 rounded text-xs font-mono font-bold border bg-amber-950/60 hover:bg-amber-900/70 text-amber-300 border-amber-500/40 flex items-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                AI CHEAT SHEET
               </button>
             </div>
 
@@ -180,17 +190,24 @@ export default function App() {
         {/* Desktop Side Rail */}
         {showRail && (
           <div className="hidden lg:block">
-            <EvidenceRail hostIp={HOST_IP} refreshTrigger={railRefresh} />
+            <EvidenceRail hostIp={HOST_IP} refreshTrigger={railRefresh} onOpenGuide={() => setShowGuide(true)} />
           </div>
         )}
 
         {/* Mobile Full-Screen Kill-Feed Tab */}
         {mobileTab === 'killfeed' && (
           <div className="flex-1 lg:hidden overflow-y-auto">
-            <EvidenceRail hostIp={HOST_IP} refreshTrigger={railRefresh} fullWidthMobile={true} />
+            <EvidenceRail
+              hostIp={HOST_IP}
+              refreshTrigger={railRefresh}
+              fullWidthMobile={true}
+              onOpenGuide={() => setShowGuide(true)}
+            />
           </div>
         )}
       </div>
+
+      <OperatorCheatSheetModal open={showGuide} onClose={() => setShowGuide(false)} />
 
       <CommandPrompt
         hostIp={HOST_IP}
@@ -236,6 +253,13 @@ export default function App() {
         >
           <Users className="w-3.5 h-3.5" />
           FACES
+        </button>
+        <button
+          onClick={() => setShowGuide(true)}
+          className="flex items-center gap-1 px-2.5 py-1 rounded font-bold text-amber-300"
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          GUIDE
         </button>
       </nav>
     </div>

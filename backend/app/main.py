@@ -37,7 +37,7 @@ from app.services.discord_bot import (
     set_mute_minutes_db,
     sync_discord_cheatsheet,
 )
-from app.agent.orchestrator import deep_inspect_detection, process_command_prompt
+from app.agent.orchestrator import deep_inspect_detection, process_command_prompt, _event_touches_tripwire
 
 STREAMS = ["annke_1", "tapo_1", "tapo_2"]
 os.makedirs(SNAPSHOT_DIR, exist_ok=True)
@@ -153,10 +153,61 @@ async def sync_schedules_to_engine(cv_engine: EdgeCVEngine):
         return cv_engine.get_schedules_status()
 
 
+async def _cleanup_recent_headless_false_ids():
+    """
+    Repairs recent person events (last 24h) that were mislabeled `ID: ...` from poisoned dynamic vectors
+    when the saved person crop contains zero valid facial features, restoring `_BREACH` if inside a tripwire.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    repaired = 0
+    async with AsyncSessionLocal() as session:
+        zones_res = await session.execute(select(CameraZone))
+        zones_by_cam: dict[str, list[CameraZone]] = {}
+        for z in zones_res.scalars().all():
+            zones_by_cam.setdefault(z.camera_id, []).append(z)
+
+        ev_res = await session.execute(
+            select(DetectionEvent)
+            .where(
+                DetectionEvent.category == "person",
+                DetectionEvent.timestamp >= cutoff,
+                DetectionEvent.sub_type.like("ID:%"),
+            )
+            .order_by(DetectionEvent.timestamp.desc())
+            .limit(40)
+        )
+        for ev in ev_res.scalars().all():
+            snap_id = (ev.attributes or "").split("|")[0].strip()
+            crop_p = f"{SNAPSHOT_DIR}/crop_{snap_id}" if snap_id else ""
+            has_real_face = False
+            if crop_p and os.path.exists(crop_p):
+                img = cv2.imread(crop_p)
+                if img is not None and img.size > 0:
+                    vec, _, _ = face_engine.extract_person_crop_face(img, for_enrollment=False)
+                    has_real_face = vec is not None
+            if not has_real_face:
+                in_tw = "BREACH" in (ev.full_label or "") or _event_touches_tripwire(
+                    ev, zones_by_cam.get(ev.camera_id, [])
+                )
+                slot = ev.motion_slot or "Motion_1"
+                ev.sub_type = "person"
+                ev.full_label = f"{slot}_person{'_BREACH' if in_tw else ''}"
+                old_note = ev.ai_notes or ""
+                if "]" in old_note and old_note.startswith("🧬 ["):
+                    old_note = old_note.split("]", 1)[1].strip()
+                ev.ai_notes = old_note or "[Biometric sanitizer cleared non-face false ID]"
+                ev.attributes = f"{snap_id}|{ev.ai_notes}"[:250] if snap_id else ev.ai_notes[:250]
+                repaired += 1
+        if repaired:
+            await session.commit()
+            print(f"[FACE SANITIZER] Repaired {repaired} recent non-face DetectionEvent card(s).")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await face_engine.sync_gallery_from_db_and_disk()
+    await face_engine.sanitize_gallery_on_startup()
+    await _cleanup_recent_headless_false_ids()
     loop = asyncio.get_running_loop()
     event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -456,7 +507,6 @@ async def enroll_face_from_detection(event_id: int, payload: EnrollFaceDTO):
 
         snap_id = (ev.attributes or "").split("|")[0].strip()
         crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}"
-        full_path = f"{SNAPSHOT_DIR}/full_{snap_id}"
 
         # Clean up any auto-enrolled VISITOR_XX that was assigned to this event
         old_sub = ev.sub_type or ""
@@ -465,21 +515,17 @@ async def enroll_face_from_detection(event_id: int, payload: EnrollFaceDTO):
                 if token.startswith("VISITOR_"):
                     await session.execute(delete(KnownFace).where(KnownFace.name == token))
 
+        # Strictly extract ONLY from the upper head/shoulders of the target crop (never scan full_path background)
         vec, _, face_crop = (None, 0.0, None)
         if os.path.exists(crop_path):
-            vec, _, face_crop = face_engine.extract_face_data(cv2.imread(crop_path))
-        if vec is None and os.path.exists(full_path):
-            vec, _, face_crop = face_engine.extract_face_data(cv2.imread(full_path))
+            vec, _, face_crop = face_engine.extract_person_crop_face(cv2.imread(crop_path), for_enrollment=True)
 
         ev.sub_type = f"⚠️ WATCHLIST: {clean_name}" if payload.role == "watchlist" else f"ID: {clean_name}"
         ev.full_label = f"{ev.motion_slot}_{clean_name}"
 
-        if vec is not None:
+        if vec is not None and face_crop is not None:
             persistent_fname = f"enrolled_{clean_name}_{int(time.time() * 1000)}.jpg"
-            if face_crop is not None:
-                cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
-            elif os.path.exists(crop_path):
-                cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", cv2.imread(crop_path))
+            cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
 
             row = KnownFace(
                 name=clean_name,
@@ -493,7 +539,7 @@ async def enroll_face_from_detection(event_id: int, payload: EnrollFaceDTO):
             ai_note = f"🧬 [ENROLLED {payload.role.upper()}: {clean_name}]"
             status_str = "ENROLLED"
         else:
-            ai_note = f"🏷️ [LABELED {clean_name} — Face angled/distant, linked to {clean_name}]"
+            ai_note = f"🏷️ [LABELED {clean_name} — No clear frontal face in crop; vector gallery kept clean]"
             status_str = "LABELED_NO_VECTOR"
 
         ev.ai_notes = ai_note
@@ -769,29 +815,31 @@ async def api_teach_detection(event_id: int, payload: dict):
         lessons = get_ai_lessons()
         if correct_category == "person":
             clean_person = correct_sub_type.replace("ID:", "").strip().upper()
+            crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}" if snap_id else ""
             if clean_person in ("PERSON", "STRANGER", "VISITOR", "UNKNOWN"):
+                purged_vecs = await face_engine.purge_matching_enrolled_vectors(crop_path, wrong_sub)
+                cz_res = await session.execute(select(CameraZone).where(CameraZone.camera_id == ev.camera_id))
+                in_tw = "BREACH" in (ev.full_label or "") or _event_touches_tripwire(ev, cz_res.scalars().all())
                 final_sub = "person"
-                new_label = f"{slot_prefix}_person"
-                ai_note = f"[🎓 CORRECTION] Cleared ID '{wrong_sub}' -> Unknown Person"
+                new_label = f"{slot_prefix}_person{'_BREACH' if in_tw else ''}"
+                purge_msg = f" (purged {purged_vecs} bad face vector)" if purged_vecs else ""
+                ai_note = f"[🎓 CORRECTION] Cleared ID '{wrong_sub}' -> Unknown Stranger{purge_msg}"
             else:
                 final_sub = f"ID: {clean_person}"
                 new_label = f"{slot_prefix}_{clean_person}"
-                # Also attempt biometric face enrollment if a clear face is present in this snapshot
-                crop_path = f"{SNAPSHOT_DIR}/crop_{snap_id}"
-                full_path = f"{SNAPSHOT_DIR}/full_{snap_id}"
+                # Strictly enroll ONLY if a sharp frontal/3-quarter face exists in the upper person crop (never full_path)
                 vec, _, face_crop = (None, 0.0, None)
-                if snap_id and os.path.exists(crop_path):
-                    vec, _, face_crop = face_engine.extract_face_data(cv2.imread(crop_path))
-                if vec is None and snap_id and os.path.exists(full_path):
-                    vec, _, face_crop = face_engine.extract_face_data(cv2.imread(full_path))
+                if crop_path and os.path.exists(crop_path):
+                    vec, _, face_crop = face_engine.extract_person_crop_face(
+                        cv2.imread(crop_path), for_enrollment=True
+                    )
                 if "VISITOR_" in wrong_sub:
                     for token in wrong_sub.replace("(", " ").replace(")", " ").split():
                         if token.startswith("VISITOR_"):
                             await session.execute(delete(KnownFace).where(KnownFace.name == token))
-                if vec is not None:
+                if vec is not None and face_crop is not None:
                     persistent_fname = f"enrolled_{clean_person}_{int(time.time() * 1000)}.jpg"
-                    if face_crop is not None:
-                        cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+                    cv2.imwrite(f"{FACE_CROPS_DIR}/{persistent_fname}", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
                     session.add(
                         KnownFace(
                             name=clean_person,
@@ -804,7 +852,7 @@ async def api_teach_detection(event_id: int, payload: dict):
                     )
                     ai_note = f"🧬 [ENROLLED WHITELIST: {clean_person}] Corrected from '{wrong_sub}'"
                 else:
-                    ai_note = f"🏷️ [LABELED: {clean_person}] Corrected from '{wrong_sub}'"
+                    ai_note = f"🏷️ [LABELED: {clean_person} — No clear face enrolled] Corrected from '{wrong_sub}'"
         elif correct_category == "delivery":
             clean_carrier = correct_sub_type.replace("📦 DELIVERY:", "").replace("🔇 SERVICE:", "").strip().upper()
             rule_map = {r["id"]: r for r in get_delivery_rules()}

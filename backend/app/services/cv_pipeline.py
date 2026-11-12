@@ -305,7 +305,7 @@ class TrueDisplacementTracker:
             used_slots.add(slot)
             self.tracks[slot] = {
                 "cx": cx, "cy": cy, "foot_y": det["y"] + det["h"] * 0.95, "area": det["area"],
-                "category": det["category"], "face_name": None, "face_role": None, "face_sightings": 1,
+                "category": det["category"], "face_name": None, "face_role": None, "face_score": 0.0, "face_sightings": 1,
                 "breach_latched": False, "breach_logged": False, "last_seen": now,
                 "history": deque([(cx, cy, 0.0, now)], maxlen=8),
             }
@@ -330,23 +330,34 @@ class TrueDisplacementTracker:
             if net_disp < (0.038 if det["category"] == "vehicle" else 0.022) or det.get("step_disp", 0.0) < (0.008 if det["category"] == "vehicle" else 0.004):
                 continue
 
+            fname = None
             if det["category"] == "person":
-                fname, frole, _, fsightings = face_engine.identify_person_in_frame(frame, det)
-                if fname:
-                    tr.update({"face_name": fname, "face_role": frole, "face_sightings": fsightings})
+                fname, frole, fscore, fsightings = face_engine.identify_person_in_frame(frame, det)
+                if fname and (
+                    fscore >= tr.get("face_score", 0.0)
+                    or (tr.get("face_role") == "visitor" and frole in ("whitelist", "watchlist", "watchlist_auto") and fscore >= 0.52)
+                ):
+                    tr.update({"face_name": fname, "face_role": frole, "face_score": fscore, "face_sightings": fsightings})
 
-            recognized_name = tr.get("face_name")
-            recognized_role = tr.get("face_role")
-            recognized_sightings = tr.get("face_sightings", 1)
+            # Do not stamp a stale track identity onto a headless waist-down crop clipped at the top of the frame
+            clipped_headless = det["category"] == "person" and fname is None and det["y"] <= 0.008 and det["h"] < 0.36
+            if clipped_headless and tr.get("face_score", 0.0) < 0.56:
+                recognized_name, recognized_role, recognized_score, recognized_sightings = None, None, 0.0, 1
+            else:
+                recognized_name = tr.get("face_name")
+                recognized_role = tr.get("face_role")
+                recognized_score = float(tr.get("face_score", 0.0))
+                recognized_sightings = tr.get("face_sightings", 1)
 
+            strong_whitelist = recognized_role == "whitelist" and recognized_score >= 0.52
             crossed_tripwire_now = any(
                 z["zone_type"] == "tripwire" and bbox_or_step_touches_polygon(det, z["points"], det.get("prev_foot"))
                 for z in cam_zones
-            ) and (recognized_role != "whitelist")
+            ) and (not strong_whitelist)
 
             if crossed_tripwire_now:
                 tr["breach_latched"] = True
-            elif recognized_role == "whitelist":
+            elif strong_whitelist:
                 tr["breach_latched"] = False
 
             is_breach = bool(tr.get("breach_latched", False))

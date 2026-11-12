@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import type { PersistedDetectionEvent } from '../types/telemetry';
 import {
+  BookOpen,
   Camera,
   Check,
   Clock,
@@ -21,6 +22,7 @@ interface EvidenceRailProps {
   hostIp: string;
   refreshTrigger?: number;
   fullWidthMobile?: boolean;
+  onOpenGuide?: () => void;
 }
 
 const CAM_NAMES: Record<string, string> = {
@@ -64,7 +66,12 @@ const TEACH_PRESETS: Record<string, { label: string; value: string }[]> = {
   ],
 };
 
-export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = false }: EvidenceRailProps) {
+export function EvidenceRail({
+  hostIp,
+  refreshTrigger = 0,
+  fullWidthMobile = false,
+  onOpenGuide,
+}: EvidenceRailProps) {
   const [events, setEvents] = useState<PersistedDetectionEvent[]>([]);
   const [catFilter, setCatFilter] = useState<string>('ALL');
   const [fetchLimit, setFetchLimit] = useState<number>(60);
@@ -276,6 +283,16 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
             <span className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-200">
               KILL-FEED ({events.length})
             </span>
+            {onOpenGuide && (
+              <button
+                onClick={onOpenGuide}
+                title="Open AI Teaching & Biometrics Cheat Sheet"
+                className="px-1.5 py-0.5 rounded text-[9px] font-mono font-bold bg-amber-950/80 hover:bg-amber-900 text-amber-300 border border-amber-500/40 flex items-center gap-0.5 cursor-pointer"
+              >
+                <BookOpen className="w-2.5 h-2.5" />
+                GUIDE
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-1">
             {([60, 200, 600] as const).map((lim) => (
@@ -449,10 +466,22 @@ export function EvidenceRail({ hostIp, refreshTrigger = 0, fullWidthMobile = fal
                   onClick={(e) => e.stopPropagation()}
                   className="mt-2 p-2 rounded bg-zinc-950 border border-amber-500/40 space-y-2"
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-mono font-bold text-amber-300">
-                      🎓 1-CLICK CORRECTION:
-                    </span>
+                  <div className="flex items-center justify-between gap-1">
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] font-mono font-bold text-amber-300">
+                        🎓 FIX:
+                      </span>
+                      {onOpenGuide && (
+                        <button
+                          type="button"
+                          onClick={onOpenGuide}
+                          title="When to click TEACH vs leave alone"
+                          className="text-[9px] font-mono font-bold px-1 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 text-emerald-300 border border-emerald-500/40 cursor-pointer"
+                        >
+                          ? GUIDE
+                        </button>
+                      )}
+                    </div>
                     <div className="flex gap-1">
                       {(['animal', 'person', 'delivery', 'vehicle'] as const).map((catOpt) => (
                         <button
