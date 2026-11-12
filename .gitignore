@@ -34,4 +34,5 @@ backend/models/*.json
 backend/models/*.pt
 backend/models/*.onnx
 runtime_data/
-docs/NasonNation_Command_Architecture_v7.2.pdf
+docs/NasonNation_Command_Architecture_v7.*.pdf
+docs/NasonNation_Command_Architecture_Confidential*.pdf
