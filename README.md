@@ -12,13 +12,17 @@
 [![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL_16-316192?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker Compose](https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 
+<br/>
+
+<img src="docs/nason_command_v73_hero.jpg" alt="NasonNation // Command — Zero-Cloud Edge AI, Biometrics & Automatic License Plate Recognition (ALPR)" width="100%" />
+
 </div>
 
 ---
 
 ## ⚡ Overview
 
-**NasonNation | Command** is a self-hosted, containerized full-stack Video Management System (VMS) and edge-autonomy telemetry platform engineered for real-time situational awareness. 
+**NasonNation | Command** is a self-hosted, containerized full-stack Video Management System (VMS), facial biometrics engine, and **Automatic License Plate Recognition (ALPR)** telemetry platform engineered for real-time situational awareness. 
 
 Designed around the constraints of edge hardware, **Command** decouples ultra-low-latency video transport (**WebRTC WHEP over single-port UDP**) from asynchronous computer vision and AI orchestration (**FastAPI + ONNX Runtime + Hybrid LAN GPU/Cloud LLM routing**). Video streams render at native 30 FPS with sub-250ms glass-to-glass latency while the backend performs motion-gated object detection, persistent centroid tracking, automated evidence capture, and natural-language tactical tool calling.
 
