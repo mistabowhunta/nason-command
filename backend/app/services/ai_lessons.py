@@ -30,6 +30,15 @@ DEFAULT_LESSONS = [
 _MEM_LESSONS = [dict(x) for x in DEFAULT_LESSONS]
 
 
+def _normalize_wrong_sub(raw_wrong: str) -> str:
+    w = (raw_wrong or "").replace("📦", "").replace("🔇", "").strip().lower()
+    if w.startswith("id: "):
+        return "person"
+    if "[" in w:
+        w = w.split("[", 1)[0].strip()
+    return w
+
+
 def _sanitize_lessons(raw_list: list[dict]) -> list[dict]:
     cleaned = []
     for item in raw_list:
@@ -37,7 +46,9 @@ def _sanitize_lessons(raw_list: list[dict]) -> list[dict]:
         c_sub = str(item.get("correct_sub_type") or "").lower()
         if c_cat == "person" and any(n in c_sub for n in ("isaac", "jennifer", "beau", "lyla")):
             continue
-        cleaned.append(item)
+        norm_item = dict(item)
+        norm_item["wrong_sub_type"] = _normalize_wrong_sub(str(item.get("wrong_sub_type") or ""))
+        cleaned.append(norm_item)
     if not any(x.get("wrong_sub_type") == "bird" and x.get("correct_sub_type") == "cat" for x in cleaned):
         cleaned.append(dict(DEFAULT_LESSONS[1], id=max([int(x.get("id", 0)) for x in cleaned] + [1]) + 1))
     return cleaned
@@ -82,17 +93,40 @@ def get_ai_lessons(camera_id: str | None = None) -> list[dict]:
 def add_ai_lesson(camera_id: str, wrong_sub_type: str, correct_category: str, correct_sub_type: str, note: str) -> list[dict]:
     global _MEM_LESSONS
     lessons = get_ai_lessons()
-    next_id = max([int(x.get("id", 0)) for x in lessons] + [0]) + 1
-    entry = {
-        "id": next_id,
-        "camera_id": camera_id or "ALL",
-        "wrong_sub_type": (wrong_sub_type or "").strip().lower(),
-        "correct_category": (correct_category or "animal").strip().lower(),
-        "correct_sub_type": (correct_sub_type or "dog").strip().lower(),
-        "note": (note or "").strip(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    lessons.append(entry)
+    cam = camera_id or "ALL"
+    w_sub = _normalize_wrong_sub(wrong_sub_type)
+    c_cat = (correct_category or "animal").strip().lower()
+    c_sub = (correct_sub_type or "dog").strip().lower()
+    clean_note = (note or "").strip()
+
+    existing = next(
+        (
+            x
+            for x in lessons
+            if x.get("camera_id") == cam
+            and x.get("wrong_sub_type") == w_sub
+            and x.get("correct_category") == c_cat
+            and x.get("correct_sub_type") == c_sub
+        ),
+        None,
+    )
+    if existing:
+        if clean_note:
+            existing["note"] = clean_note
+        existing["created_at"] = datetime.now(timezone.utc).isoformat()
+    else:
+        next_id = max([int(x.get("id", 0)) for x in lessons] + [0]) + 1
+        lessons.append(
+            {
+                "id": next_id,
+                "camera_id": cam,
+                "wrong_sub_type": w_sub,
+                "correct_category": c_cat,
+                "correct_sub_type": c_sub,
+                "note": clean_note,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     with _lock:
         _MEM_LESSONS = lessons
         try:

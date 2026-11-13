@@ -461,21 +461,26 @@ async def deep_inspect_detection(event_id: int) -> dict:
                 try:
                     with open(img_to_send, "rb") as f:
                         images_b64 = [base64.b64encode(f.read()).decode("utf-8")]
-                    if ev.category == "vehicle" and plate_path and os.path.exists(plate_path):
+                    if ev.category in ("person", "delivery") and full_path and full_path != img_to_send and os.path.exists(full_path):
+                        with open(full_path, "rb") as ff:
+                            images_b64.append(base64.b64encode(ff.read()).decode("utf-8"))
+                    elif ev.category == "vehicle" and plate_path and os.path.exists(plate_path):
                         with open(plate_path, "rb") as pf:
                             images_b64.append(base64.b64encode(pf.read()).decode("utf-8"))
 
                     prompt = (
                         f"Analyze this security camera image from '{ev.camera_id}' (initial detector guess: category={ev.category}, sub_type={ev.sub_type}). "
+                        "For person/delivery detections, Image 1 is the close-up subject crop and Image 2 (if provided) is the full wide scene context. "
                         f"USER TAUGHT RULES FOR THIS CAMERA: {lessons_text or 'None'}. "
                         f"CONFIGURED DELIVERY/SERVICE RULES: {rules_text}. "
                         "Note: grayscale images are infrared night vision on dry pavement. "
-                        "If this is purely an inanimate false trigger (empty pavement, wind-blown tree/shadow, IR spiderweb, trash bin, or headlight glare with NO actual person, vehicle, or animal visible), set 'valid_target' to false and 'category' to 'false_alarm'. "
+                        "If this is purely an inanimate false trigger (empty pavement, wind-blown tree/shadow, IR spiderweb, stationary unattended trash bin, or headlight glare with NO actual person, vehicle, or animal present), set 'valid_target' to false and 'category' to 'false_alarm'. "
                         "If a person is walking an animal on a sidewalk/leash, classify sub_type as 'dog' and mention the owner/leash in summary. "
                         "If a small four-legged animal is alone on the driveway/pavement with NO person or leash visible, classify sub_type as 'cat'. "
                         "If a vehicle is visible, inspect both the vehicle and bumper crop to read any legible license plate characters into 'plate' (or 'NONE'). "
-                        f"If a delivery carrier or service crew (like LANDSCAPERS with mowers/blowers/vests/bandanas or AMAZON/UPS/FEDEX/USPS) is visible, set 'carrier' to one of {active_rule_names} (or 'NONE') and note if a package was left. "
-                        "Set 'face_visible' to true ONLY if a person's actual facial features (eyes/nose) are clearly visible in the image; set 'face_visible' to false if the person is walking away, only the back of their head/hoodie/backpack is visible, or their head is cropped out of frame. "
+                        f"If a commercial delivery carrier or service crew (like LANDSCAPERS with mowers/blowers/vests/bandanas or AMAZON/UPS/FEDEX/USPS with branded vest/uniform, delivery van/truck, or shipping box) is visible, set 'carrier' to one of {active_rule_names} (or 'NONE') and note if a package was left. "
+                        "CRITICAL GUARDRAIL: Residents or people in casual clothes rolling wheeled curbside trash, recycling, or yard-waste bins (blue, black, green, or gray plastic carts with lids/wheels) or walking around parked household vehicles without a commercial delivery uniform or delivery van are household activity ('category': 'person', 'carrier': 'NONE') — NEVER classify wheeled blue recycling/trash bins as AMAZON. "
+                        "Set 'face_visible' to true ONLY if a person's actual facial features (eyes/nose) are clearly visible in Image 1 (the close-up crop); set 'face_visible' to false if walking away, only the back of their head/hoodie/backpack is visible, blurry night silhouette, or head cropped out. "
                         "Respond ONLY with valid JSON: "
                         '{"valid_target": true, "face_visible": false, "category": "person|delivery|vehicle|animal|false_alarm", '
                         '"sub_type": "short label like cat, dog, white suv, or person", '
@@ -601,6 +606,37 @@ async def deep_inspect_detection(event_id: int) -> dict:
 
             ev.ai_notes = ai_notes_out or ev.ai_notes
             ev.attributes = f"{snap_id}|{ai_notes_out}"[:250] if (snap_id and ai_notes_out) else (snap_id or ai_notes_out)[:250]
+
+            # Reconcile earlier un-identified 'person' entry frame on the exact same continuous Motion_slot track
+            # when a whitelisted family member steps closer into lighting within 15s (slots stay reserved for 25s).
+            if (
+                face_role == "whitelist"
+                and recognized_face
+                and (ev.sub_type or "").startswith("ID: ")
+                and ev.motion_slot
+                and ev.timestamp
+            ):
+                clean_wl = (ev.sub_type or "").replace("ID:", "").strip()
+                sib_res = await session.execute(
+                    select(DetectionEvent).where(
+                        DetectionEvent.camera_id == ev.camera_id,
+                        DetectionEvent.motion_slot == ev.motion_slot,
+                        DetectionEvent.id != ev.id,
+                        DetectionEvent.category == "person",
+                        DetectionEvent.sub_type == "person",
+                        DetectionEvent.timestamp >= ev.timestamp - _td(seconds=15),
+                        DetectionEvent.timestamp <= ev.timestamp + _td(seconds=3),
+                    )
+                )
+                for sib in sib_res.scalars().all():
+                    sib_snap = (sib.attributes or "").split("|")[0].strip()
+                    sib_prev = (sib.ai_notes or "").replace("🚨 [BREACH] ", "")
+                    sib_note = f"🧬 [Track-confirmed {clean_wl}] {sib_prev}".strip()
+                    sib.sub_type = f"ID: {clean_wl}"
+                    sib.full_label = f"{sib.motion_slot}_{clean_wl}"
+                    sib.ai_notes = sib_note
+                    sib.attributes = f"{sib_snap}|{sib_note}"[:250] if sib_snap else sib_note[:250]
+
             await session.commit()
 
             asyncio.create_task(_evaluate_best_confidence_push(ev.id, face_role, recognized_face))

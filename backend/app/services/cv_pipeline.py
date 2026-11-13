@@ -306,7 +306,7 @@ class TrueDisplacementTracker:
             self.tracks[slot] = {
                 "cx": cx, "cy": cy, "foot_y": det["y"] + det["h"] * 0.95, "area": det["area"],
                 "category": det["category"], "face_name": None, "face_role": None, "face_score": 0.0, "face_sightings": 1,
-                "breach_latched": False, "breach_logged": False, "last_seen": now,
+                "breach_latched": False, "breach_logged": False, "identity_logged": None, "last_seen": now,
                 "history": deque([(cx, cy, 0.0, now)], maxlen=8),
             }
             det["step_disp"] = 0.0
@@ -384,13 +384,20 @@ class TrueDisplacementTracker:
             active_output.append(box_item)
 
             just_breached = is_breach and not tr.get("breach_logged", False)
+            just_identified = bool(
+                recognized_name
+                and recognized_role in ("whitelist", "watchlist", "watchlist_auto")
+                and tr.get("identity_logged") != recognized_name
+            )
             already_logged = any(
                 c["category"] == det["category"] and math.hypot(tr["cx"] - c["cx"], tr["cy"] - c["cy"]) < 0.14 and (now - c["time"]) < 45.0
                 for c in self.spatial_cooldowns
             )
-            if just_breached or not already_logged:
+            if just_breached or just_identified or not already_logged:
                 if is_breach:
                     tr["breach_logged"] = True
+                if just_identified:
+                    tr["identity_logged"] = recognized_name
                 self.spatial_cooldowns.append({"category": det["category"], "cx": tr["cx"], "cy": tr["cy"], "time": now})
                 new_db_events.append(dict(box_item))
 

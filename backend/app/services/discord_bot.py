@@ -189,7 +189,7 @@ def build_cheatsheet_embed() -> dict:
             "name": "🎓 Kill-Feed AI Teaching & Biometrics Cheat Sheet",
             "value": (
                 "• 🔴 **Stranger called `ISAAC`/`JENNIFER`** → Click `🎓 TEACH → 👤 STRANGER` *(purges bad face vector)*\n"
-                "• 🟡 **You/Family from behind (hoodie/hat) called `person`** → **Leave alone** *(no face visible)*\n"
+                "• 🟡 **You/Family from behind (`person` / trash-bin `AMAZON`)** → Ignore *or* `🎓 TEACH → ✅ ISAAC/JENNIFER` *(clears BREACH/AMAZON without saving bad vectors)*\n"
                 "• 🟢 **Delivery / Landscapers / Cat mislabeled** → Click `🎓 TEACH` *(VLM learns from any angle)*\n"
                 "• 📤 **Best Family Enrollment** → Use `FACE GALLERY → UPLOAD` with 1–2 crisp phone portraits"
             ),

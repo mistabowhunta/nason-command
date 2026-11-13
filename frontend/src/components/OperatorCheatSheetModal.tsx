@@ -96,24 +96,25 @@ export function OperatorCheatSheetModal({ open, onClose }: OperatorCheatSheetMod
                 </p>
               </div>
 
-              {/* Card 2: Family from behind */}
+              {/* Card 2: Family from behind or Trash-Bin False Carrier */}
               <div className="rounded-lg bg-amber-950/20 border border-amber-500/40 p-3 space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500 text-black uppercase">
-                    🟡 HANDS OFF / IGNORE
+                    🟡 BACK OF HEAD / CHORES
                   </span>
-                  <span className="text-[10px] text-amber-300 font-bold">BACK OF HEAD / HOODIE</span>
+                  <span className="text-[10px] text-amber-300 font-bold">NO FACE / TRASH BINS</span>
                 </div>
                 <div className="text-xs font-bold text-zinc-100">
-                  You or family walking away (hoodie, hat brim, jeans) labeled{' '}
-                  <span className="text-zinc-300">person</span>
+                  You/family from behind labeled <span className="text-zinc-300">person</span> (or{' '}
+                  <span className="text-amber-300">📦 AMAZON</span> with blue trash bins)
                 </div>
                 <div className="text-[11px] bg-zinc-950/90 border border-amber-500/30 rounded px-2 py-1 text-zinc-200 font-bold">
-                  ✋ Action: Leave it alone as &ldquo;person&rdquo;
+                  👉 Ignore &ldquo;person&rdquo;  |  or  🎓 TEACH → ✅ ISAAC / JENNIFER
                 </div>
                 <p className="text-[10px] text-zinc-400 leading-relaxed">
-                  When no face is visible, <span className="text-zinc-200">person</span> is correct. We block clothes
-                  memorization on purpose so random kids in hoodies never match you.
+                  Clears <span className="text-red-300">🚨 BREACH</span> / false <span className="text-amber-300">AMAZON</span>{' '}
+                  on the card while <span className="text-zinc-200">blocking bad face vectors</span> when no sharp face is visible
+                  (never use <span className="text-sky-300">👤 ID FACE</span> from behind).
                 </p>
               </div>
 

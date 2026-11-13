@@ -11,7 +11,7 @@ DEFAULT_RULES = [
         "name": "AMAZON",
         "kind": "carrier",
         "alert_mode": "alert",
-        "cues": "Amazon Prime logo, blue delivery vest, Amazon delivery van/Rivian, cardboard packages/totes",
+        "cues": "Amazon Prime smile logo, branded blue Amazon delivery vest/polo, Amazon Prime delivery van/Rivian, brown cardboard shipping parcels (NOT wheeled blue curbside recycling or trash bins)",
         "sightings": 0,
         "last_seen": None,
     },
@@ -124,6 +124,20 @@ def record_delivery_sighting(rule_id: str, iso_ts: str) -> dict | None:
         if r["id"] == clean_id:
             r["sightings"] = int(r.get("sightings") or 0) + 1
             r["last_seen"] = iso_ts
+            matched = dict(r)
+            break
+    if matched:
+        save_delivery_rules(rules)
+    return matched
+
+
+def decrement_delivery_sighting(rule_id: str) -> dict | None:
+    clean_id = rule_id.strip().upper()
+    rules = get_delivery_rules()
+    matched = None
+    for r in rules:
+        if r["id"] == clean_id:
+            r["sightings"] = max(0, int(r.get("sightings") or 0) - 1)
             matched = dict(r)
             break
     if matched:

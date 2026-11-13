@@ -758,7 +758,12 @@ async def agent_command_endpoint(payload: AgentCommandDTO):
     return await process_command_prompt(payload.prompt)
 
 # --- v7 Delivery & Service Rules Endpoints ---
-from app.services.delivery_rules import get_delivery_rules, upsert_delivery_rule, delete_delivery_rule
+from app.services.delivery_rules import (
+    get_delivery_rules,
+    upsert_delivery_rule,
+    delete_delivery_rule,
+    decrement_delivery_sighting,
+)
 
 @app.get("/api/delivery-rules")
 async def api_get_delivery_rules():
@@ -812,6 +817,22 @@ async def api_teach_detection(event_id: int, payload: dict):
             + ((ev.full_label or "Motion_1").split("_")[1] if "_" in (ev.full_label or "") else "1")
         )
 
+        was_delivery = (ev.category == "delivery") or ("DELIVERY:" in (wrong_sub or "").upper()) or ("SERVICE:" in (wrong_sub or "").upper())
+        wrong_carrier = ""
+        if was_delivery:
+            wrong_carrier = (
+                (wrong_sub or "")
+                .replace("📦", "")
+                .replace("🔇", "")
+                .replace("DELIVERY:", "")
+                .replace("SERVICE:", "")
+                .split("[")[0]
+                .strip()
+                .upper()
+            )
+            if wrong_carrier and correct_category != "delivery":
+                decrement_delivery_sighting(wrong_carrier)
+
         lessons = get_ai_lessons()
         if correct_category == "person":
             clean_person = correct_sub_type.replace("ID:", "").strip().upper()
@@ -853,6 +874,18 @@ async def api_teach_detection(event_id: int, payload: dict):
                     ai_note = f"🧬 [ENROLLED WHITELIST: {clean_person}] Corrected from '{wrong_sub}'"
                 else:
                     ai_note = f"🏷️ [LABELED: {clean_person} — No clear face enrolled] Corrected from '{wrong_sub}'"
+
+            # If VLM falsely labeled a resident/person as a delivery carrier (e.g. rolling blue trash bins -> AMAZON),
+            # write a clean generic negative carrier lesson (never storing family names in VLM clothing rules).
+            if was_delivery and wrong_carrier:
+                lessons = add_ai_lesson(
+                    camera_id=ev.camera_id,
+                    wrong_sub_type=f"delivery: {wrong_carrier.lower()}",
+                    correct_category="person",
+                    correct_sub_type="person",
+                    note=note
+                    or f"Casual resident/person (e.g. rolling wheeled curbside trash/recycling bins or driveway activity without commercial uniform/van) is NOT {wrong_carrier} delivery.",
+                )
         elif correct_category == "delivery":
             clean_carrier = correct_sub_type.replace("📦 DELIVERY:", "").replace("🔇 SERVICE:", "").strip().upper()
             rule_map = {r["id"]: r for r in get_delivery_rules()}
